@@ -90,12 +90,21 @@ def run_pipeline():
     ``config.py``) -- ``degraded_fallback`` in the return value flags this so
     the UI can warn plainly.
 
+    The pre-trained model's features are dataset-agnostic, but SBERT and
+    tfidf_svd (``config.SEMANTIC_BACKEND = "auto"``) produce different score
+    distributions, and ``"auto"`` can resolve differently on the machine that
+    trained ``models/classifier.pkl`` versus the one running it now (e.g. no
+    sentence-transformers installed). When that happens,
+    ``classifier.is_backend_mismatch`` flags it and ``backend_mismatch`` in
+    the return value carries ``(trained_backend, actual_backend)`` so the UI
+    can warn that the pre-trained cut-offs may no longer apply.
+
     Returns:
         A dict with every artifact the views need: blocking stats, scored
         pairs, classifier report (None if unlabelled), tier thresholds, match
         result, the edge-threshold sweep (None if unlabelled), accuracy
-        metrics (None if unlabelled), ``has_labels`` and
-        ``degraded_fallback``.
+        metrics (None if unlabelled), ``has_labels``, ``degraded_fallback``
+        and ``backend_mismatch`` (None unless a genuine mismatch was found).
     """
     dataset, joined, text, extracted = load_everything()
     candidates = blocking.candidate_pairs(joined)
@@ -134,16 +143,23 @@ def run_pipeline():
             ),
         )
         degraded_fallback = False
+        backend_mismatch = None
     else:
         truth = None
         blocking_stats = candidates.stats
         report = None
+        backend_mismatch = None
 
         model = classifier.load_model_or_none()
         degraded_fallback = model is None
         if model is not None:
             scored["match_probability"] = classifier.predict_proba(model, scored)
             tiers = classifier.pretrained_tiers()
+
+            trained_backend = classifier.load_model_backend()
+            actual_backend = scored.attrs.get("semantic_backend")
+            if classifier.is_backend_mismatch(trained_backend, actual_backend):
+                backend_mismatch = (trained_backend, actual_backend)
         else:
             scored["match_probability"] = scored["fused"]
             tiers = classifier.fallback_tiers()
@@ -162,6 +178,7 @@ def run_pipeline():
     return {
         "has_labels": dataset.has_labels,
         "degraded_fallback": degraded_fallback,
+        "backend_mismatch": backend_mismatch,
         "blocking": blocking_stats,
         "scored": scored,
         "report": report,
@@ -277,6 +294,24 @@ def view_run_matching() -> None:
             for line in artifacts["report"].summary_lines():
                 st.text(line)
         elif not artifacts["degraded_fallback"]:
+            if artifacts["backend_mismatch"]:
+                trained_backend, actual_backend = artifacts["backend_mismatch"]
+                st.error(
+                    f"**Backend mismatch**: `models/classifier.pkl` was "
+                    f"trained on `{trained_backend}` features, but this run "
+                    f"scored pairs with `{actual_backend}` -- "
+                    "`config.SEMANTIC_BACKEND = \"auto\"` resolved "
+                    "differently on this machine (for example, "
+                    "sentence-transformers isn't installed, or there's no "
+                    "network access). The two backends produce different "
+                    "score distributions, so `match_probability` and the "
+                    "PRETRAINED_EDGE_THRESHOLD/PRETRAINED_HIGH_THRESHOLD "
+                    f"cut-offs -- calibrated for `{trained_backend}` -- may "
+                    "be miscalibrated for this run. Regenerate the model on "
+                    "this machine with `python -m src.classifier`, or match "
+                    "its environment (install sentence-transformers / "
+                    "restore network access) to clear this warning."
+                )
             st.info(
                 "No GroundTruth_Group column: skipping classifier training. "
                 "Using the shipped pre-trained classifier "
@@ -293,7 +328,7 @@ def view_run_matching() -> None:
                 "found: falling back to the hand-fused similarity score. "
                 "Measured on the demo dataset with labels stripped, this "
                 "fallback reaches only ~0.26 F1 at best (precision as low "
-                "as 0.024 at threshold 0.65) against 0.899 for the "
+                "as 0.024 at threshold 0.65) against 0.897 for the "
                 "trained-classifier path -- **treat these results as "
                 "indicative only.**"
             )

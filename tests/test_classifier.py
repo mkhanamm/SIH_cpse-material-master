@@ -13,7 +13,10 @@ from src.classifier import (
     calibrate_tiers,
     fallback_tiers,
     group_disjoint_split,
+    is_backend_mismatch,
     label_pairs,
+    load_model,
+    load_model_backend,
     load_model_or_none,
     pretrained_tiers,
     save_model,
@@ -200,6 +203,64 @@ class TestLoadModelOrNone:
         assert load_model_or_none(tmp_path / "does_not_exist.pkl") is None
 
     def test_returns_pipeline_when_present(self, tmp_path):
+        """Old, bare-pipeline artifact format -- no backend tag."""
         path = tmp_path / "classifier.pkl"
         save_model("a fitted pipeline stand-in", path)
         assert load_model_or_none(path) == "a fitted pipeline stand-in"
+
+    def test_unwraps_dict_format_artifact(self, tmp_path):
+        """New format tags the backend; load_model_or_none must still hand
+        back the bare pipeline, not the wrapper dict."""
+        path = tmp_path / "classifier.pkl"
+        save_model("a fitted pipeline stand-in", path, backend="tfidf_svd")
+        assert load_model_or_none(path) == "a fitted pipeline stand-in"
+
+
+class TestLoadModelBackend:
+    def test_missing_artifact_raises(self, tmp_path):
+        with pytest.raises(FileNotFoundError):
+            load_model_backend(tmp_path / "does_not_exist.pkl")
+
+    def test_returns_recorded_backend(self, tmp_path):
+        path = tmp_path / "classifier.pkl"
+        save_model("a fitted pipeline stand-in", path, backend="tfidf_svd")
+        assert load_model_backend(path) == "tfidf_svd"
+
+    def test_old_bare_pipeline_format_reports_unknown(self, tmp_path):
+        """A pre-existing artifact from before the backend tag existed."""
+        path = tmp_path / "classifier.pkl"
+        save_model("a fitted pipeline stand-in", path)
+        assert load_model_backend(path) is None
+
+    def test_load_model_unwraps_dict_format(self, tmp_path):
+        """load_model() stays backward compatible: same pipeline either way."""
+        path = tmp_path / "classifier.pkl"
+        save_model("a fitted pipeline stand-in", path, backend="sbert")
+        assert load_model(path) == "a fitted pipeline stand-in"
+
+
+class TestBackendMismatchDetection:
+    """The bug this guards against: config.SEMANTIC_BACKEND='auto' can resolve
+    to a different backend on the machine that trained models/classifier.pkl
+    than on the machine running it, silently miscalibrating match_probability."""
+
+    def test_matching_backends_is_not_a_mismatch(self):
+        assert is_backend_mismatch("tfidf_svd", "tfidf_svd") is False
+
+    def test_differing_backends_is_a_mismatch(self):
+        assert is_backend_mismatch("tfidf_svd", "sbert") is True
+        assert is_backend_mismatch("sbert", "tfidf_svd") is True
+
+    def test_unknown_trained_backend_is_not_reported_as_mismatch(self):
+        """An old bare-pipeline artifact recorded nothing to compare against;
+        that must not raise a false alarm on every load."""
+        assert is_backend_mismatch(None, "sbert") is False
+        assert is_backend_mismatch(None, "tfidf_svd") is False
+
+    def test_end_to_end_via_saved_artifact(self, tmp_path):
+        """Round-trip through save_model/load_model_backend into the check."""
+        path = tmp_path / "classifier.pkl"
+        save_model("a fitted pipeline stand-in", path, backend="tfidf_svd")
+        trained = load_model_backend(path)
+        assert is_backend_mismatch(trained, "sbert") is True
+        assert is_backend_mismatch(trained, "tfidf_svd") is False

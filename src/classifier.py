@@ -460,7 +460,7 @@ def fallback_tiers(
     stripped and scored against its (withheld) ground truth: at threshold
     0.65, precision is 0.024 with 4,753 of 5,008 records merged into 467
     clusters; the best F1 reachable across a 0.65-0.92 sweep is 0.264,
-    against 0.899 for the trained-classifier path. The fused score does not
+    against 0.897 for the trained-classifier path. The fused score does not
     separate classes well enough to survive transitive chaining in
     clustering. Callers must warn the user plainly when this path is in use.
 
@@ -618,26 +618,41 @@ def predict_proba(pipeline: Pipeline, scored_pairs: pd.DataFrame) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # Persistence
 # ---------------------------------------------------------------------------
-def save_model(pipeline: Pipeline, path=None) -> None:
-    """Persist a fitted pipeline.
+def save_model(pipeline: Pipeline, path=None, backend: str | None = None) -> None:
+    """Persist a fitted pipeline, optionally tagged with its semantic backend.
+
+    SBERT and tfidf_svd produce different score distributions (see
+    ``similarity.SemanticEncoder``), so a model trained on one backend's
+    features and later fed the other's is silently miscalibrated, not
+    broken -- it still returns probabilities, just not meaningful ones, and
+    :data:`config.PRETRAINED_EDGE_THRESHOLD` / ``PRETRAINED_HIGH_THRESHOLD``
+    were calibrated for one specific backend. Recording the backend inside
+    the artifact lets :func:`load_model_backend` and
+    :func:`is_backend_mismatch` catch this at load time instead of letting
+    it degrade silently.
 
     Args:
         pipeline: Fitted pipeline.
         path: Destination; defaults to ``config.CLASSIFIER_PATH``.
+        backend: Semantic backend the training features were computed with
+            (e.g. ``scored_pairs.attrs["semantic_backend"]``). Omit to save
+            a bare pipeline -- the old format, with no mismatch detection.
     """
     path = path or config.CLASSIFIER_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
-    joblib.dump(pipeline, path)
+    artifact = {"pipeline": pipeline, "backend": backend} if backend else pipeline
+    joblib.dump(artifact, path)
 
 
-def load_model(path=None) -> Pipeline:
-    """Load a persisted pipeline.
+def _load_raw(path=None) -> object:
+    """Deserialize a saved classifier artifact, dict or bare pipeline alike.
 
     Args:
         path: Source; defaults to ``config.CLASSIFIER_PATH``.
 
     Returns:
-        The fitted pipeline.
+        Whatever :func:`save_model` wrote: a ``{"pipeline", "backend"}``
+        dict, or a bare pipeline from before that format existed.
 
     Raises:
         FileNotFoundError: If no model artifact exists.
@@ -648,6 +663,27 @@ def load_model(path=None) -> Pipeline:
             f"No classifier at {path}. Run `python -m src.classifier` to train one."
         )
     return joblib.load(path)
+
+
+def load_model(path=None) -> Pipeline:
+    """Load a persisted pipeline.
+
+    Backward compatible with both artifact formats: a bare pipeline (old
+    format) is returned as-is, and a ``{"pipeline", "backend"}`` dict (see
+    :func:`save_model`) has its pipeline unwrapped. Callers that only need
+    the pipeline -- not the backend check -- can ignore the distinction.
+
+    Args:
+        path: Source; defaults to ``config.CLASSIFIER_PATH``.
+
+    Returns:
+        The fitted pipeline.
+
+    Raises:
+        FileNotFoundError: If no model artifact exists.
+    """
+    raw = _load_raw(path)
+    return raw["pipeline"] if isinstance(raw, dict) and "pipeline" in raw else raw
 
 
 def load_model_or_none(path=None) -> Pipeline | None:
@@ -670,6 +706,53 @@ def load_model_or_none(path=None) -> Pipeline | None:
         return None
 
 
+def load_model_backend(path=None) -> str | None:
+    """Return the semantic backend a saved classifier artifact was trained on.
+
+    Args:
+        path: Source; defaults to ``config.CLASSIFIER_PATH``.
+
+    Returns:
+        The recorded backend name, or None if the artifact predates
+        :func:`save_model`'s ``backend`` tag (a bare-pipeline file) -- there
+        is nothing to compare against, so callers should treat None as
+        "unknown", not as a mismatch.
+
+    Raises:
+        FileNotFoundError: If no model artifact exists.
+    """
+    raw = _load_raw(path)
+    return raw.get("backend") if isinstance(raw, dict) else None
+
+
+def is_backend_mismatch(trained_backend: str | None, actual_backend: str | None) -> bool:
+    """Whether a loaded classifier's training backend differs from the one in use.
+
+    SBERT and tfidf_svd embeddings occupy different score ranges, so
+    ``match_probability`` computed by feeding one backend's features to a
+    model trained on the other is silently wrong -- it does not crash, it
+    just means nothing, and the PRETRAINED_EDGE_THRESHOLD/HIGH_THRESHOLD
+    cut-offs no longer apply. This happens whenever ``config.SEMANTIC_BACKEND
+    = "auto"`` resolves differently between the machine that trained
+    ``models/classifier.pkl`` and the machine running it -- e.g.
+    sentence-transformers or network access is available on one and not the
+    other.
+
+    Args:
+        trained_backend: Backend recorded in the artifact
+            (:func:`load_model_backend`), or None if unrecorded.
+        actual_backend: Backend that actually scored the current data
+            (``scored_pairs.attrs["semantic_backend"]``).
+
+    Returns:
+        True on a genuine mismatch. False when they match, or when
+        ``trained_backend`` is None -- an old artifact recorded nothing to
+        compare against, so this reports no mismatch rather than a false
+        alarm.
+    """
+    return trained_backend is not None and trained_backend != actual_backend
+
+
 if __name__ == "__main__":  # pragma: no cover - trains and saves the artifact
     from . import attribute_extraction, blocking, ingestion, similarity
     from .normalization import normalize_series
@@ -688,5 +771,5 @@ if __name__ == "__main__":  # pragma: no cover - trains and saves the artifact
         if name == "logistic_regression":
             print("feature weights:", report.feature_weights)
         else:
-            save_model(model)
+            save_model(model, backend=scored.attrs.get("semantic_backend"))
         print()
