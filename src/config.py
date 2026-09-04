@@ -103,9 +103,25 @@ EXACT_MATCH_ATTRIBUTES = ["schedule", "pressure_class", "grade", "spec_standard"
 # ---------------------------------------------------------------------------
 # Confidence thresholds (fused score, 0-1)
 # ---------------------------------------------------------------------------
-HIGH_CONFIDENCE_THRESHOLD = 0.85    # auto-suggest a CNMC
-MEDIUM_CONFIDENCE_THRESHOLD = 0.65  # queue for human review
-# Below MEDIUM -> no match asserted.
+# Tier cut-offs are CALIBRATED, not hard-coded -- see
+# classifier.calibrate_tiers. A fixed 0.85/0.65 pair is only valid on the score
+# scale it was written for, and this system has three such scales in play (the
+# hand-fused score, and classifier probabilities under each semantic backend).
+# What is fixed instead is the business question: how precise must a merge be
+# before it happens without a human?
+HIGH_TIER_PRECISION_TARGET = 0.95
+
+# Cluster-level precision required before a merge happens with no human in the
+# loop. Deliberately stricter than the F1-optimal operating point: F1 treats a
+# missed duplicate and a wrongly merged pair of national codes as equally bad,
+# and they are not. A missed duplicate is found on the next run; a bad merge
+# puts two different materials behind one code across every CPSE that adopts it.
+AUTO_APPROVE_PRECISION_TARGET = 0.99
+
+# Fallback cut-offs, used only for the hand-fused score when no trained
+# classifier is available (e.g. the app's "score without model" path).
+FUSED_HIGH_CONFIDENCE_THRESHOLD = 0.85
+FUSED_MEDIUM_CONFIDENCE_THRESHOLD = 0.65
 
 # A pair with fewer than this many jointly-known attributes cannot be routed to
 # HIGH regardless of text similarity; it goes to UNKNOWN / "insufficient data".
@@ -114,16 +130,37 @@ MEDIUM_CONFIDENCE_THRESHOLD = 0.65  # queue for human review
 # confidence at scale.
 MIN_KNOWN_ATTRIBUTES_FOR_AUTO = 2
 
-# Minimum average internal edge score for a connected component to stay whole.
+# A connected component stays whole only if its mean internal edge weight is at
+# least this multiple of the MEDIUM tier threshold. Expressed as a ratio rather
+# than an absolute score so it, too, survives a change of scoring scale.
 # Guards against transitive chaining (A~B, B~C, A!~C) collapsing a category
 # into one giant cluster.
-MIN_CLUSTER_COHESION = 0.70
+MIN_CLUSTER_COHESION_RATIO = 1.0
 
 # ---------------------------------------------------------------------------
 # Blocking
 # ---------------------------------------------------------------------------
-# Union of two key families; see src/blocking.py for why one is not enough.
-BLOCKING_KEYS = ["category_size", "attribute_signature"]
+# Union of key families; see src/blocking.py for what each one covers.
+# Benchmarked on the full 5,008-row dataset (src.blocking.compare_schemes):
+#
+#   scheme                    comparisons  reduction  recall ceiling  pairs lost
+#   none (all pairs)           12,537,528       1.0x         100.00%           0
+#   category_size only            174,466      71.9x          98.21%          47
+#   category_token only           185,088      67.7x          97.72%          60
+#   attribute_signature only       11,123    1127.2x           4.64%       2,507
+#   category_size + token         193,924      64.7x         100.00%           0
+#   union (all three)             194,400      64.5x         100.00%           0
+#
+# category_token costs 11% more comparisons than category_size alone and buys
+# back all 47 pairs that exact-category blocking cannot reach. Worth it.
+#
+# attribute_signature is implemented and available, but on THIS dataset it adds
+# 476 comparisons and zero pairs, because all five sectors draw category names
+# from one shared vocabulary -- an artifact of the synthetic data. Enable it for
+# a real multi-CPSE load where taxonomies are genuinely disjoint and the
+# category keys have nothing to agree on:
+#     BLOCKING_KEYS = ["category_size", "category_token", "attribute_signature"]
+BLOCKING_KEYS = ["category_size", "category_token"]
 SIZE_BUCKET_MM = 25.0    # coarse rounding for the category key
 MAX_BLOCK_SIZE = 400     # a block larger than this is sub-split; prevents one
                          # huge category from dominating runtime
@@ -156,4 +193,8 @@ CONSOLIDATION_PRICE_BENEFIT_PCT = 0.03  # volume leverage from consolidated dema
 # Reproducibility
 # ---------------------------------------------------------------------------
 RANDOM_SEED = 42
+# Ground-truth groups are split three ways, never pairs -- see
+# classifier.group_disjoint_split. Validation exists so the decision threshold
+# is tuned without ever touching the reported test set.
 TEST_SPLIT_FRACTION = 0.30
+VAL_SPLIT_FRACTION = 0.15
