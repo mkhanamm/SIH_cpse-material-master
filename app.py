@@ -293,7 +293,7 @@ def view_run_matching() -> None:
                 "found: falling back to the hand-fused similarity score. "
                 "Measured on the demo dataset with labels stripped, this "
                 "fallback reaches only ~0.26 F1 at best (precision as low "
-                "as 0.024 at threshold 0.65) against 0.897 for the "
+                "as 0.024 at threshold 0.65) against 0.899 for the "
                 "trained-classifier path -- **treat these results as "
                 "indicative only.**"
             )

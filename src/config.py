@@ -139,7 +139,7 @@ PRETRAINED_HIGH_THRESHOLD = 0.85
 # labels stripped and scored against its (withheld) ground truth: at
 # threshold 0.65, precision is 0.024 with 4,753 of 5,008 records merged into
 # 467 clusters; the best F1 reachable across a 0.65-0.92 sweep is 0.264,
-# against 0.897 for the trained-classifier path. The fused score does not
+# against 0.899 for the trained-classifier path. The fused score does not
 # separate classes well enough to survive transitive chaining in
 # clustering -- this fallback exists so the pipeline still runs end to end,
 # not because its output is trustworthy. Callers MUST warn the user plainly

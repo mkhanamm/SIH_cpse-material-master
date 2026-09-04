@@ -11,9 +11,13 @@ venv/
 outputs/*
 !outputs/.gitkeep
 
-# Trained model artifact is regenerable via `python -m src.classifier`
+# models/classifier.pkl is committed deliberately: the unlabelled pipeline
+# path (app.run_pipeline via classifier.load_model_or_none) depends on it at
+# runtime so a fresh clone works on an uploaded dataset without retraining.
+# Regenerate it with `python -m src.classifier`. Any other .pkl stays ignored.
 models/*.pkl
 !models/.gitkeep
+!models/classifier.pkl
 
 # Cached embeddings
 *.npy

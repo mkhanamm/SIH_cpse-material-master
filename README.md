@@ -88,6 +88,8 @@ streamlit run app.py
 
 Python 3.10+. The dataset ships in `data/`, and a trained model artifact in `models/`, so the app runs immediately with no preparation step.
 
+`models/classifier.pkl` is committed deliberately, not just left over from development: it is what the app loads for a dataset with no `GroundTruth_Group` column (a real CPSE upload), so uploaded datasets get real classifier-based matching out of the box, without a training step. `python -m src.classifier` regenerates it.
+
 To reproduce the pipeline outside the UI:
 
 ```bash
