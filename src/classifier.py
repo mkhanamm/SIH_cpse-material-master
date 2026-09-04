@@ -326,6 +326,10 @@ class TierThresholds:
         achieved_high_precision: Validation precision actually attained.
         achieved_high_recall: Validation recall at the high cut-off -- how much
             of the duplicate population can be cleared without human effort.
+        calibrated: False when ``high``/``medium`` are the fixed fallback
+            cut-offs (:func:`fallback_tiers`) rather than derived from a
+            precision target on validation data -- i.e. there was no
+            ground truth to calibrate against.
     """
 
     high: float
@@ -333,6 +337,7 @@ class TierThresholds:
     high_precision_target: float
     achieved_high_precision: float
     achieved_high_recall: float
+    calibrated: bool = True
 
     def summary_lines(self) -> list[str]:
         """Render the calibration for the app and the report.
@@ -340,6 +345,14 @@ class TierThresholds:
         Returns:
             Human-readable lines.
         """
+        if not self.calibrated:
+            return [
+                f"HIGH   >= {self.high:.3f}  (fixed fallback threshold -- no "
+                "ground-truth labels to calibrate against) -> auto-suggest CNMC",
+                f"MEDIUM >= {self.medium:.3f}  (fixed fallback threshold) -> "
+                "human review",
+                f"LOW    <  {self.medium:.3f}  -> no match asserted",
+            ]
         return [
             f"HIGH   >= {self.high:.3f}  "
             f"(validation precision {self.achieved_high_precision:.3f} "
@@ -396,6 +409,38 @@ def calibrate_tiers(
         high_precision_target=high_precision_target,
         achieved_high_precision=achieved_precision,
         achieved_high_recall=achieved_recall,
+    )
+
+
+def fallback_tiers(
+    high: float = config.FUSED_HIGH_CONFIDENCE_THRESHOLD,
+    medium: float = config.FUSED_MEDIUM_CONFIDENCE_THRESHOLD,
+) -> TierThresholds:
+    """Fixed tier cut-offs for the hand-fused score, used when there is no
+    ground truth to calibrate against.
+
+    ``config.FUSED_HIGH_CONFIDENCE_THRESHOLD`` and
+    ``config.FUSED_MEDIUM_CONFIDENCE_THRESHOLD`` exist for exactly this case:
+    a real CPSE upload has no ``GroundTruth_Group`` column, so neither
+    :func:`calibrate_tiers` (needs validation labels) nor
+    ``matching_engine.calibrate_tiers_from_sweep`` (needs a truth-pair sweep)
+    can run. The fallback routes on ``similarity.score_pairs``'s ``fused``
+    column instead of a trained ``match_probability``.
+
+    Args:
+        high: Auto-approve cut-off on the fused score.
+        medium: Human-review cut-off on the fused score.
+
+    Returns:
+        A :class:`TierThresholds` with ``calibrated=False``.
+    """
+    return TierThresholds(
+        high=high,
+        medium=medium,
+        high_precision_target=float("nan"),
+        achieved_high_precision=float("nan"),
+        achieved_high_recall=float("nan"),
+        calibrated=False,
     )
 
 

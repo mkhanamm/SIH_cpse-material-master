@@ -89,9 +89,15 @@ class MaterialDataset:
             is the record id used by every downstream module.
         eval_df: Evaluation-only columns (`Standardized Description`,
             `GroundTruth_Group`), sharing the same index as ``pipeline_df``.
+            Real CPSE uploads carry neither column, so this may be empty.
         sector_reference: The `Sector_CPSE_Reference` lookup sheet.
         profile: Profiling statistics for the dashboard.
         source_path: Where the workbook was loaded from.
+        has_labels: Whether ``GroundTruth_Group`` was present in the source
+            workbook. False for real CPSE data, which has no answer key --
+            callers must check this before using any ground-truth helper
+            below (``ground_truth_pairs``, ``ground_truth_summary``,
+            ``find_cross_cpse_examples``) or training the classifier.
     """
 
     pipeline_df: pd.DataFrame
@@ -99,6 +105,7 @@ class MaterialDataset:
     sector_reference: pd.DataFrame
     profile: ProfileStats
     source_path: Path
+    has_labels: bool = True
     _leak_guard: tuple[str, ...] = field(default=tuple(config.EVAL_COLUMNS))
 
     def assert_no_leakage(self) -> None:
@@ -129,7 +136,9 @@ def load_dataset(path: Path | str | None = None) -> MaterialDataset:
 
     Returns:
         A :class:`MaterialDataset` whose ``pipeline_df`` contains only columns
-        the matcher is permitted to see.
+        the matcher is permitted to see. ``GroundTruth_Group`` is optional --
+        real CPSE exports do not have it, and its absence is reported via
+        ``dataset.has_labels`` rather than raised as an error.
 
     Raises:
         FileNotFoundError: If the workbook is missing.
@@ -163,6 +172,7 @@ def load_dataset(path: Path | str | None = None) -> MaterialDataset:
         sector_reference=sector_reference,
         profile=profile_dataframe(raw),
         source_path=path,
+        has_labels="GroundTruth_Group" in eval_df.columns,
     )
     dataset.assert_no_leakage()
     return dataset
@@ -212,7 +222,17 @@ def ground_truth_pairs(eval_df: pd.DataFrame) -> set[tuple[int, int]]:
         Set of index pairs. On the supplied dataset this is 2,629 pairs out of
         12,537,528 possible -- a 0.02% positive rate, which is why blocking and
         a precision-aware threshold matter more than raw accuracy.
+
+    Raises:
+        ValueError: If ``eval_df`` has no ``GroundTruth_Group`` column --
+            check ``dataset.has_labels`` before calling this.
     """
+    if "GroundTruth_Group" not in eval_df.columns:
+        raise ValueError(
+            "No GroundTruth_Group column: this dataset has no ground-truth "
+            "labels. Check dataset.has_labels before calling evaluation "
+            "helpers."
+        )
     pairs: set[tuple[int, int]] = set()
     for _, idx in eval_df.groupby("GroundTruth_Group").groups.items():
         members = sorted(int(i) for i in idx)
@@ -237,7 +257,17 @@ def ground_truth_summary(
     Returns:
         Dict with total groups, multi-member groups, cross-CPSE groups, and the
         pair-level breakdown.
+
+    Raises:
+        ValueError: If ``eval_df`` has no ``GroundTruth_Group`` column --
+            check ``dataset.has_labels`` before calling this.
     """
+    if "GroundTruth_Group" not in eval_df.columns:
+        raise ValueError(
+            "No GroundTruth_Group column: this dataset has no ground-truth "
+            "labels. Check dataset.has_labels before calling evaluation "
+            "helpers."
+        )
     cpse = pipeline_df["CPSE"]
     grouped = eval_df.groupby("GroundTruth_Group")
     sizes = grouped.size()
@@ -278,7 +308,16 @@ def find_cross_cpse_examples(
     Returns:
         A list of small frames, each one equivalence group, with the CPSE code,
         raw description and standardized description side by side.
+
+    Raises:
+        ValueError: If ``dataset.has_labels`` is False.
     """
+    if not dataset.has_labels:
+        raise ValueError(
+            "No GroundTruth_Group column: this dataset has no ground-truth "
+            "labels, so there are no known duplicate groups to pull examples "
+            "from."
+        )
     joined = dataset.pipeline_df.join(dataset.eval_df)
     examples: list[pd.DataFrame] = []
 

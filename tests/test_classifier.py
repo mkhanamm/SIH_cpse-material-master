@@ -6,10 +6,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from src import config
 from src.classifier import (
     FEATURE_COLUMNS,
     build_features,
     calibrate_tiers,
+    fallback_tiers,
     group_disjoint_split,
     label_pairs,
     tune_threshold,
@@ -133,3 +135,34 @@ class TestTierCalibration:
         y = np.array([0, 0, 1, 1])
         tiers = calibrate_tiers(y, np.array([0.1, 0.2, 0.8, 0.9]))
         assert len(tiers.summary_lines()) == 3
+
+
+class TestFallbackTiers:
+    """Tier cut-offs used when a dataset has no GroundTruth_Group to calibrate from."""
+
+    def test_defaults_to_config_fused_thresholds(self):
+        tiers = fallback_tiers()
+        assert tiers.high == config.FUSED_HIGH_CONFIDENCE_THRESHOLD
+        assert tiers.medium == config.FUSED_MEDIUM_CONFIDENCE_THRESHOLD
+
+    def test_marked_as_not_calibrated(self):
+        assert fallback_tiers().calibrated is False
+
+    def test_calibrated_tiers_default_to_true(self):
+        """A normally-calibrated TierThresholds must not look like a fallback."""
+        y = np.array([0, 0, 1, 1])
+        tiers = calibrate_tiers(y, np.array([0.1, 0.2, 0.8, 0.9]))
+        assert tiers.calibrated is True
+
+    def test_custom_thresholds_are_honoured(self):
+        tiers = fallback_tiers(high=0.9, medium=0.6)
+        assert (tiers.high, tiers.medium) == (0.9, 0.6)
+
+    def test_summary_lines_do_not_mention_validation(self):
+        """Nothing was calibrated, so the summary must not claim it was."""
+        lines = "\n".join(fallback_tiers().summary_lines())
+        assert "validation" not in lines.lower()
+        assert "fixed fallback" in lines.lower()
+
+    def test_summary_lines_render_without_error(self):
+        assert len(fallback_tiers().summary_lines()) == 3

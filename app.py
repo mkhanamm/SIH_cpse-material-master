@@ -70,46 +70,82 @@ def load_everything():
 def run_pipeline():
     """Execute blocking, similarity, classification and clustering.
 
+    Two paths, chosen by ``dataset.has_labels``:
+
+    LABELLED (``GroundTruth_Group`` present, e.g. the synthetic dataset) --
+    trains the classifier, tunes the edge threshold against ground truth, and
+    calibrates tiers and accuracy metrics from it.
+
+    UNLABELLED (real CPSE uploads) -- there is no answer key, so training,
+    edge-threshold tuning and accuracy scoring all have nothing to run
+    against. Edge weight falls back to the hand-fused score from
+    ``similarity.score_pairs``, and tiers fall back to the fixed
+    ``config.FUSED_HIGH/MEDIUM_CONFIDENCE_THRESHOLD`` cut-offs. Clustering,
+    explanations, CNMC generation, review and the audit trail are unaffected
+    -- only the accuracy metrics are unavailable.
+
     Returns:
-        A dict with every artifact the views need: blocking stats, scored pairs,
-        classifier report, tier thresholds, match result and the edge-threshold
-        sweep.
+        A dict with every artifact the views need: blocking stats, scored
+        pairs, classifier report (None if unlabelled), tier thresholds, match
+        result, the edge-threshold sweep (None if unlabelled), accuracy
+        metrics (None if unlabelled) and ``has_labels``.
     """
     dataset, joined, text, extracted = load_everything()
-    truth = ingestion.ground_truth_pairs(dataset.eval_df)
-
     candidates = blocking.candidate_pairs(joined)
-    blocking_stats = blocking.evaluate_blocking(candidates, truth)
-
     scored = similarity.score_pairs(joined, candidates.pairs, text)
-    model, report = classifier.train(scored, dataset.eval_df)
-    scored["match_probability"] = classifier.predict_proba(model, scored)
 
-    _, _, test_mask, _ = classifier.group_disjoint_split(scored, dataset.eval_df)
-    test_records = set(scored.loc[test_mask, "idx_a"]) | set(
-        scored.loc[test_mask, "idx_b"]
-    )
-    tuning_records = set(joined.index) - test_records
+    if dataset.has_labels:
+        truth = ingestion.ground_truth_pairs(dataset.eval_df)
+        blocking_stats = blocking.evaluate_blocking(candidates, truth)
 
-    edge_threshold, sweep = matching_engine.tune_edge_threshold(
-        scored, joined, truth, tuning_records, extracted["n_known_attributes"]
-    )
-    tiers = matching_engine.calibrate_tiers_from_sweep(sweep, edge_threshold)
-    result = matching_engine.run_matching(
-        scored,
-        joined,
-        tiers,
-        edge_threshold=edge_threshold,
-        attribute_counts=extracted["n_known_attributes"],
-    )
-    metrics = matching_engine.evaluate(
-        result,
-        truth,
-        joined,
-        tiers=(matching_engine.HIGH, matching_engine.MEDIUM, matching_engine.UNKNOWN),
-    )
+        model, report = classifier.train(scored, dataset.eval_df)
+        scored["match_probability"] = classifier.predict_proba(model, scored)
+
+        _, _, test_mask, _ = classifier.group_disjoint_split(scored, dataset.eval_df)
+        test_records = set(scored.loc[test_mask, "idx_a"]) | set(
+            scored.loc[test_mask, "idx_b"]
+        )
+        tuning_records = set(joined.index) - test_records
+
+        edge_threshold, sweep = matching_engine.tune_edge_threshold(
+            scored, joined, truth, tuning_records, extracted["n_known_attributes"]
+        )
+        tiers = matching_engine.calibrate_tiers_from_sweep(sweep, edge_threshold)
+        result = matching_engine.run_matching(
+            scored,
+            joined,
+            tiers,
+            edge_threshold=edge_threshold,
+            attribute_counts=extracted["n_known_attributes"],
+        )
+        metrics = matching_engine.evaluate(
+            result,
+            truth,
+            joined,
+            tiers=(
+                matching_engine.HIGH, matching_engine.MEDIUM, matching_engine.UNKNOWN,
+            ),
+        )
+    else:
+        truth = None
+        blocking_stats = candidates.stats
+        scored["match_probability"] = scored["fused"]
+        report = None
+        tiers = classifier.fallback_tiers()
+        edge_threshold = tiers.medium
+        sweep = None
+        result = matching_engine.run_matching(
+            scored,
+            joined,
+            tiers,
+            edge_threshold=edge_threshold,
+            score_column="fused",
+            attribute_counts=extracted["n_known_attributes"],
+        )
+        metrics = None
 
     return {
+        "has_labels": dataset.has_labels,
         "blocking": blocking_stats,
         "scored": scored,
         "report": report,
@@ -140,7 +176,6 @@ def session_state_defaults() -> None:
 def view_problem() -> None:
     """Show real cross-CPSE duplicates so the pain precedes the solution."""
     dataset, joined, _, _ = load_everything()
-    summary = ingestion.ground_truth_summary(dataset.eval_df, dataset.pipeline_df)
 
     st.header("The same material, coded differently by every enterprise")
     st.write(
@@ -150,6 +185,18 @@ def view_problem() -> None:
         "code and a different description at every enterprise that buys it. "
         "Procurement cannot aggregate demand it cannot see."
     )
+
+    if not dataset.has_labels:
+        st.info(
+            "This view illustrates the problem using the dataset's "
+            "ground-truth labels (`GroundTruth_Group`). The loaded dataset "
+            "has none, so these worked examples are unavailable -- every "
+            "other view (matching, review, national code generation, "
+            "dashboard) still runs normally."
+        )
+        return
+
+    summary = ingestion.ground_truth_summary(dataset.eval_df, dataset.pipeline_df)
 
     columns = st.columns(4)
     columns[0].metric("Material records", f"{summary['total_groups']:,} groups")
@@ -186,6 +233,7 @@ def view_run_matching() -> None:
     if st.button("Run pipeline", type="primary") or st.session_state.pipeline_run:
         st.session_state.pipeline_run = True
         artifacts = run_pipeline()
+        has_labels = artifacts["has_labels"]
         stats = artifacts["blocking"]
 
         st.subheader("Blocking")
@@ -193,16 +241,32 @@ def view_run_matching() -> None:
         columns[0].metric("All-pairs comparisons", f"{stats.naive_comparisons:,}")
         columns[1].metric("After blocking", f"{stats.blocked_comparisons:,}")
         columns[2].metric("Reduction", f"{stats.reduction_factor:.1f}x")
-        columns[3].metric("Recall ceiling", f"{stats.recall_ceiling:.2%}")
-        st.caption(
-            "A speedup figure without its recall cost is not a measurement. "
-            "This scheme loses nothing: the category-token key recovers the "
-            "pairs that exact-category blocking cannot reach."
-        )
+        if has_labels:
+            columns[3].metric("Recall ceiling", f"{stats.recall_ceiling:.2%}")
+            st.caption(
+                "A speedup figure without its recall cost is not a "
+                "measurement. This scheme loses nothing: the category-token "
+                "key recovers the pairs that exact-category blocking cannot "
+                "reach."
+            )
+        else:
+            columns[3].metric("Recall ceiling", "N/A")
+            st.caption(
+                "No GroundTruth_Group column: recall against ground truth is "
+                "unavailable for this dataset."
+            )
 
         st.subheader("Classifier, held out on unseen clusters")
-        for line in artifacts["report"].summary_lines():
-            st.text(line)
+        if has_labels:
+            for line in artifacts["report"].summary_lines():
+                st.text(line)
+        else:
+            st.info(
+                "No GroundTruth_Group column: skipping classifier training. "
+                "Edge weight falls back to the hand-fused similarity score "
+                "(`similarity.score_pairs`) instead of a trained match "
+                "probability."
+            )
 
         st.subheader("Confidence routing")
         for line in artifacts["tiers"].summary_lines():
@@ -214,29 +278,44 @@ def view_run_matching() -> None:
         )
 
         st.subheader("Cluster-level accuracy against ground truth")
-        metrics = artifacts["metrics"]
-        table = pd.DataFrame(
-            [
-                {
-                    "scope": scope.replace("_", "-"),
-                    "precision": round(metrics[f"{scope}_precision"], 3),
-                    "recall": round(metrics[f"{scope}_recall"], 3),
-                    "f1": round(metrics[f"{scope}_f1"], 3),
-                    "true duplicates": metrics[f"{scope}_actual"],
-                }
-                for scope in ("overall", "cross_cpse", "within_cpse")
-            ]
-        )
-        st.dataframe(table, width="stretch", hide_index=True)
+        if has_labels:
+            metrics = artifacts["metrics"]
+            table = pd.DataFrame(
+                [
+                    {
+                        "scope": scope.replace("_", "-"),
+                        "precision": round(metrics[f"{scope}_precision"], 3),
+                        "recall": round(metrics[f"{scope}_recall"], 3),
+                        "f1": round(metrics[f"{scope}_f1"], 3),
+                        "true duplicates": metrics[f"{scope}_actual"],
+                    }
+                    for scope in ("overall", "cross_cpse", "within_cpse")
+                ]
+            )
+            st.dataframe(table, width="stretch", hide_index=True)
+        else:
+            st.info(
+                "No ground-truth labels in this dataset, so accuracy metrics "
+                "are unavailable. Clustering, explanations, CNMC generation, "
+                "review and the audit trail all still ran on the fused-score "
+                "tiers above."
+            )
 
         with st.expander("Edge-threshold sweep (why the cut-off is what it is)"):
-            st.caption(
-                "The pair-optimal threshold is not the cluster-optimal one. A "
-                "cluster asserts equivalence between every pair of its members, "
-                "so one bad edge joining two correct clusters of five "
-                "manufactures 25 false pairs."
-            )
-            st.dataframe(artifacts["sweep"], width="stretch", hide_index=True)
+            if has_labels:
+                st.caption(
+                    "The pair-optimal threshold is not the cluster-optimal "
+                    "one. A cluster asserts equivalence between every pair "
+                    "of its members, so one bad edge joining two correct "
+                    "clusters of five manufactures 25 false pairs."
+                )
+                st.dataframe(artifacts["sweep"], width="stretch", hide_index=True)
+            else:
+                st.caption(
+                    "The sweep is measured against ground-truth pairs, which "
+                    "this dataset does not have. The edge threshold instead "
+                    "uses the fixed fallback cut-off shown above."
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -363,6 +442,15 @@ def view_human_review() -> None:
 
     st.divider()
     st.subheader("Active learning: does review actually help?")
+    if not artifacts["has_labels"]:
+        st.info(
+            "This demo simulates a reviewer from ground-truth labels, which "
+            "this dataset does not have. Approve/reject/edit above still "
+            "work and are logged to the audit trail normally; only this "
+            "simulated before/after comparison is unavailable."
+        )
+        return
+
     st.caption(
         "Simulated decisions are derived from ground truth so the loop can be "
         "demonstrated in a live session. They stand in for a reviewer; they are "
@@ -526,7 +614,6 @@ def view_dashboard() -> None:
     artifacts = run_pipeline()
     result = artifacts["result"]
     metrics = artifacts["metrics"]
-    summary = ingestion.ground_truth_summary(dataset.eval_df, dataset.pipeline_df)
 
     columns = st.columns(4)
     columns[0].metric("Materials scanned", f"{len(joined):,}")
@@ -542,30 +629,39 @@ def view_dashboard() -> None:
     )
 
     st.subheader("Validation against known ground truth")
-    st.dataframe(
-        pd.DataFrame(
-            [
-                {
-                    "measure": "Cross-CPSE duplicate groups in data",
-                    "value": summary["cross_cpse_groups"],
-                },
-                {
-                    "measure": "Cross-CPSE duplicate pairs recovered",
-                    "value": metrics["cross_cpse_true_positives"],
-                },
-                {
-                    "measure": "Cross-CPSE recall",
-                    "value": round(metrics["cross_cpse_recall"], 3),
-                },
-                {
-                    "measure": "Cross-CPSE precision",
-                    "value": round(metrics["cross_cpse_precision"], 3),
-                },
-            ]
-        ),
-        width="stretch",
-        hide_index=True,
-    )
+    if artifacts["has_labels"]:
+        summary = ingestion.ground_truth_summary(dataset.eval_df, dataset.pipeline_df)
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "measure": "Cross-CPSE duplicate groups in data",
+                        "value": summary["cross_cpse_groups"],
+                    },
+                    {
+                        "measure": "Cross-CPSE duplicate pairs recovered",
+                        "value": metrics["cross_cpse_true_positives"],
+                    },
+                    {
+                        "measure": "Cross-CPSE recall",
+                        "value": round(metrics["cross_cpse_recall"], 3),
+                    },
+                    {
+                        "measure": "Cross-CPSE precision",
+                        "value": round(metrics["cross_cpse_precision"], 3),
+                    },
+                ]
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+    else:
+        st.info(
+            "No GroundTruth_Group column in this dataset: accuracy cannot be "
+            "validated. The counts above (materials scanned, records "
+            "clustered, duplicate rate, cross-CPSE clusters) are still real "
+            "outputs of this matching run."
+        )
 
     st.subheader("Duplicate clusters by CPSE")
     counts: dict[str, int] = {}

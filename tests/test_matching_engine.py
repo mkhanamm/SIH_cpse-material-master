@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from src import config
+from src.classifier import fallback_tiers
 from src.matching_engine import (
     HIGH,
     LOW,
@@ -18,6 +19,7 @@ from src.matching_engine import (
     build_graph,
     cluster,
     evaluate,
+    run_matching,
 )
 
 
@@ -179,6 +181,59 @@ class TestClusterPairs:
             cluster_id=0, members=[2, 0, 1], mean_score=0.9, min_score=0.9
         )
         assert item.pairs() == [(0, 1), (0, 2), (1, 2)]
+
+
+class TestRunMatchingWithoutLabels:
+    """The unlabelled path: no classifier, edge weight = fused score, fixed tiers."""
+
+    def test_clusters_on_fused_score_alone(self, frame, rich_attributes):
+        scored = pd.DataFrame(
+            {
+                "idx_a": [0, 1],
+                "idx_b": [1, 2],
+                "fused": [0.95, 0.92],
+            }
+        )
+        tiers = fallback_tiers(high=0.85, medium=0.65)
+        result = run_matching(
+            scored,
+            frame,
+            tiers,
+            edge_threshold=tiers.medium,
+            score_column="fused",
+            attribute_counts=rich_attributes,
+        )
+        assert len(result.clusters) == 1
+        assert result.clusters[0].members == [0, 1, 2]
+
+    def test_tiers_route_on_fused_score(self, frame, rich_attributes):
+        scored = pd.DataFrame({"idx_a": [0], "idx_b": [1], "fused": [0.90]})
+        tiers = fallback_tiers(high=0.85, medium=0.65)
+        result = run_matching(
+            scored, frame, tiers, edge_threshold=tiers.medium,
+            score_column="fused", attribute_counts=rich_attributes,
+        )
+        assert result.clusters[0].tier == HIGH
+
+    def test_below_medium_never_enters_the_graph(self, frame, rich_attributes):
+        scored = pd.DataFrame({"idx_a": [0], "idx_b": [1], "fused": [0.40]})
+        tiers = fallback_tiers(high=0.85, medium=0.65)
+        result = run_matching(
+            scored, frame, tiers, edge_threshold=tiers.medium,
+            score_column="fused", attribute_counts=rich_attributes,
+        )
+        assert result.clusters == []
+
+    def test_does_not_require_match_probability_column(self, frame, rich_attributes):
+        """No classifier ran, so 'match_probability' need not exist at all."""
+        scored = pd.DataFrame({"idx_a": [0], "idx_b": [1], "fused": [0.90]})
+        assert "match_probability" not in scored.columns
+        tiers = fallback_tiers()
+        result = run_matching(
+            scored, frame, tiers, edge_threshold=tiers.medium,
+            score_column="fused", attribute_counts=rich_attributes,
+        )
+        assert len(result.clusters) == 1
 
 
 class TestEvaluation:
