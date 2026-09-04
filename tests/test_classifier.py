@@ -14,6 +14,9 @@ from src.classifier import (
     fallback_tiers,
     group_disjoint_split,
     label_pairs,
+    load_model_or_none,
+    pretrained_tiers,
+    save_model,
     tune_threshold,
 )
 
@@ -166,3 +169,37 @@ class TestFallbackTiers:
 
     def test_summary_lines_render_without_error(self):
         assert len(fallback_tiers().summary_lines()) == 3
+
+
+class TestPretrainedTiers:
+    """Tier cut-offs for the shipped classifier when there is no ground truth."""
+
+    def test_defaults_to_config_pretrained_thresholds(self):
+        tiers = pretrained_tiers()
+        assert tiers.high == config.PRETRAINED_HIGH_THRESHOLD
+        assert tiers.medium == config.PRETRAINED_EDGE_THRESHOLD
+
+    def test_marked_as_not_calibrated(self):
+        """Calibrated on the demo dataset, not on whatever is currently loaded."""
+        assert pretrained_tiers().calibrated is False
+
+    def test_custom_thresholds_are_honoured(self):
+        tiers = pretrained_tiers(high=0.9, medium=0.6)
+        assert (tiers.high, tiers.medium) == (0.9, 0.6)
+
+    def test_summary_lines_render_without_error(self):
+        assert len(pretrained_tiers().summary_lines()) == 3
+
+    def test_matches_the_calibrated_values_from_the_demo_dataset(self):
+        assert config.PRETRAINED_EDGE_THRESHOLD == 0.55
+        assert config.PRETRAINED_HIGH_THRESHOLD == 0.85
+
+
+class TestLoadModelOrNone:
+    def test_returns_none_when_missing(self, tmp_path):
+        assert load_model_or_none(tmp_path / "does_not_exist.pkl") is None
+
+    def test_returns_pipeline_when_present(self, tmp_path):
+        path = tmp_path / "classifier.pkl"
+        save_model("a fitted pipeline stand-in", path)
+        assert load_model_or_none(path) == "a fitted pipeline stand-in"

@@ -78,17 +78,24 @@ def run_pipeline():
 
     UNLABELLED (real CPSE uploads) -- there is no answer key, so training,
     edge-threshold tuning and accuracy scoring all have nothing to run
-    against. Edge weight falls back to the hand-fused score from
-    ``similarity.score_pairs``, and tiers fall back to the fixed
-    ``config.FUSED_HIGH/MEDIUM_CONFIDENCE_THRESHOLD`` cut-offs. Clustering,
-    explanations, CNMC generation, review and the audit trail are unaffected
-    -- only the accuracy metrics are unavailable.
+    against. This path loads the shipped ``models/classifier.pkl``
+    (``classifier.load_model_or_none``) and reuses its ``match_probability``
+    with the fixed cut-offs in ``classifier.pretrained_tiers`` -- calibrated
+    on the demo dataset, but the model's features are dataset-agnostic so
+    they transfer without retraining. Clustering, explanations, CNMC
+    generation, review and the audit trail are unaffected -- only the
+    accuracy metrics are unavailable. If no model artifact exists at all,
+    this degrades further to the hand-fused score
+    (``classifier.fallback_tiers``), which measured far worse (see
+    ``config.py``) -- ``degraded_fallback`` in the return value flags this so
+    the UI can warn plainly.
 
     Returns:
         A dict with every artifact the views need: blocking stats, scored
         pairs, classifier report (None if unlabelled), tier thresholds, match
         result, the edge-threshold sweep (None if unlabelled), accuracy
-        metrics (None if unlabelled) and ``has_labels``.
+        metrics (None if unlabelled), ``has_labels`` and
+        ``degraded_fallback``.
     """
     dataset, joined, text, extracted = load_everything()
     candidates = blocking.candidate_pairs(joined)
@@ -126,12 +133,21 @@ def run_pipeline():
                 matching_engine.HIGH, matching_engine.MEDIUM, matching_engine.UNKNOWN,
             ),
         )
+        degraded_fallback = False
     else:
         truth = None
         blocking_stats = candidates.stats
-        scored["match_probability"] = scored["fused"]
         report = None
-        tiers = classifier.fallback_tiers()
+
+        model = classifier.load_model_or_none()
+        degraded_fallback = model is None
+        if model is not None:
+            scored["match_probability"] = classifier.predict_proba(model, scored)
+            tiers = classifier.pretrained_tiers()
+        else:
+            scored["match_probability"] = scored["fused"]
+            tiers = classifier.fallback_tiers()
+
         edge_threshold = tiers.medium
         sweep = None
         result = matching_engine.run_matching(
@@ -139,13 +155,13 @@ def run_pipeline():
             joined,
             tiers,
             edge_threshold=edge_threshold,
-            score_column="fused",
             attribute_counts=extracted["n_known_attributes"],
         )
         metrics = None
 
     return {
         "has_labels": dataset.has_labels,
+        "degraded_fallback": degraded_fallback,
         "blocking": blocking_stats,
         "scored": scored,
         "report": report,
@@ -260,12 +276,26 @@ def view_run_matching() -> None:
         if has_labels:
             for line in artifacts["report"].summary_lines():
                 st.text(line)
-        else:
+        elif not artifacts["degraded_fallback"]:
             st.info(
                 "No GroundTruth_Group column: skipping classifier training. "
-                "Edge weight falls back to the hand-fused similarity score "
-                "(`similarity.score_pairs`) instead of a trained match "
-                "probability."
+                "Using the shipped pre-trained classifier "
+                "(`models/classifier.pkl`) instead -- its features "
+                "(similarity scores, attribute agreement) describe the pair, "
+                "not the dataset, so it transfers without retraining. The "
+                "edge threshold (0.55) and HIGH tier (0.85) were calibrated "
+                "on the demo dataset and may need adjusting for a "
+                "materially different catalogue."
+            )
+        else:
+            st.warning(
+                "No GroundTruth_Group column AND no `models/classifier.pkl` "
+                "found: falling back to the hand-fused similarity score. "
+                "Measured on the demo dataset with labels stripped, this "
+                "fallback reaches only ~0.26 F1 at best (precision as low "
+                "as 0.024 at threshold 0.65) against 0.897 for the "
+                "trained-classifier path -- **treat these results as "
+                "indicative only.**"
             )
 
         st.subheader("Confidence routing")
@@ -297,8 +327,8 @@ def view_run_matching() -> None:
             st.info(
                 "No ground-truth labels in this dataset, so accuracy metrics "
                 "are unavailable. Clustering, explanations, CNMC generation, "
-                "review and the audit trail all still ran on the fused-score "
-                "tiers above."
+                "review and the audit trail all still ran on the tiers shown "
+                "above."
             )
 
         with st.expander("Edge-threshold sweep (why the cut-off is what it is)"):
@@ -314,7 +344,14 @@ def view_run_matching() -> None:
                 st.caption(
                     "The sweep is measured against ground-truth pairs, which "
                     "this dataset does not have. The edge threshold instead "
-                    "uses the fixed fallback cut-off shown above."
+                    "uses the fixed cut-off shown above -- calibrated on the "
+                    "demo dataset ("
+                    + (
+                        "pre-trained classifier probability"
+                        if not artifacts["degraded_fallback"]
+                        else "hand-fused score, degraded fallback"
+                    )
+                    + ")."
                 )
 
 

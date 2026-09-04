@@ -118,8 +118,32 @@ HIGH_TIER_PRECISION_TARGET = 0.95
 # puts two different materials behind one code across every CPSE that adopts it.
 AUTO_APPROVE_PRECISION_TARGET = 0.99
 
-# Fallback cut-offs, used only for the hand-fused score when no trained
-# classifier is available (e.g. the app's "score without model" path).
+# Edge threshold and HIGH tier for the UNLABELLED path (a real CPSE upload
+# with no GroundTruth_Group). There is nothing to calibrate fresh cut-offs
+# from -- classifier.calibrate_tiers needs validation labels and
+# matching_engine.calibrate_tiers_from_sweep needs a truth-pair sweep -- so
+# this path loads the shipped models/classifier.pkl and reuses cut-offs on
+# its match_probability measured on the demo dataset instead (see
+# notebooks/evaluation.ipynb): edge threshold 0.55 (cluster-optimal), HIGH
+# >= 0.85. The model's features (similarity scores, attribute-agreement
+# flags) are dataset-agnostic, so match_probability itself transfers to new
+# data without retraining -- but these two cut-offs were calibrated
+# specifically on the demo dataset and are a starting point, not a
+# guarantee, for a materially different catalogue.
+PRETRAINED_EDGE_THRESHOLD = 0.55
+PRETRAINED_HIGH_THRESHOLD = 0.85
+
+# Degraded last-resort fallback, used ONLY when models/classifier.pkl is
+# missing and there is therefore no trained match probability at all --
+# routes on the hand-fused score instead. MEASURED on the demo dataset with
+# labels stripped and scored against its (withheld) ground truth: at
+# threshold 0.65, precision is 0.024 with 4,753 of 5,008 records merged into
+# 467 clusters; the best F1 reachable across a 0.65-0.92 sweep is 0.264,
+# against 0.897 for the trained-classifier path. The fused score does not
+# separate classes well enough to survive transitive chaining in
+# clustering -- this fallback exists so the pipeline still runs end to end,
+# not because its output is trustworthy. Callers MUST warn the user plainly
+# when this path is in use.
 FUSED_HIGH_CONFIDENCE_THRESHOLD = 0.85
 FUSED_MEDIUM_CONFIDENCE_THRESHOLD = 0.65
 

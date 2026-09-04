@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 from src import config
-from src.classifier import fallback_tiers
+from src.classifier import fallback_tiers, pretrained_tiers
 from src.matching_engine import (
     HIGH,
     LOW,
@@ -183,8 +183,9 @@ class TestClusterPairs:
         assert item.pairs() == [(0, 1), (0, 2), (1, 2)]
 
 
-class TestRunMatchingWithoutLabels:
-    """The unlabelled path: no classifier, edge weight = fused score, fixed tiers."""
+class TestRunMatchingDegradedFallback:
+    """Last-resort unlabelled path: no model artifact either, so edge weight
+    falls back to the hand-fused score with the fixed FUSED_* tiers."""
 
     def test_clusters_on_fused_score_alone(self, frame, rich_attributes):
         scored = pd.DataFrame(
@@ -234,6 +235,47 @@ class TestRunMatchingWithoutLabels:
             score_column="fused", attribute_counts=rich_attributes,
         )
         assert len(result.clusters) == 1
+
+
+class TestRunMatchingWithPretrainedModel:
+    """Primary unlabelled path: shipped classifier's match_probability, fixed
+    PRETRAINED_* tiers calibrated on the demo dataset."""
+
+    def test_clusters_on_match_probability(self, frame, rich_attributes):
+        scored = pd.DataFrame(
+            {"idx_a": [0, 1], "idx_b": [1, 2], "match_probability": [0.95, 0.92]}
+        )
+        tiers = pretrained_tiers()
+        result = run_matching(
+            scored, frame, tiers, edge_threshold=tiers.medium,
+            attribute_counts=rich_attributes,
+        )
+        assert len(result.clusters) == 1
+        assert result.clusters[0].members == [0, 1, 2]
+
+    def test_uses_config_calibrated_cutoffs_by_default(self, frame, rich_attributes):
+        scored = pd.DataFrame(
+            {"idx_a": [0], "idx_b": [1], "match_probability": [0.86]}
+        )
+        tiers = pretrained_tiers()
+        assert tiers.high == config.PRETRAINED_HIGH_THRESHOLD
+        assert tiers.medium == config.PRETRAINED_EDGE_THRESHOLD
+        result = run_matching(
+            scored, frame, tiers, edge_threshold=tiers.medium,
+            attribute_counts=rich_attributes,
+        )
+        assert result.clusters[0].tier == HIGH
+
+    def test_below_edge_threshold_never_enters_the_graph(self, frame, rich_attributes):
+        scored = pd.DataFrame(
+            {"idx_a": [0], "idx_b": [1], "match_probability": [0.50]}
+        )
+        tiers = pretrained_tiers()
+        result = run_matching(
+            scored, frame, tiers, edge_threshold=tiers.medium,
+            attribute_counts=rich_attributes,
+        )
+        assert result.clusters == []
 
 
 class TestEvaluation:

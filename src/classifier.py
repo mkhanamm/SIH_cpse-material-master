@@ -412,20 +412,57 @@ def calibrate_tiers(
     )
 
 
+def pretrained_tiers(
+    high: float = config.PRETRAINED_HIGH_THRESHOLD,
+    medium: float = config.PRETRAINED_EDGE_THRESHOLD,
+) -> TierThresholds:
+    """Tier cut-offs for the shipped pre-trained classifier on unlabelled data.
+
+    The PRIMARY path for a dataset with no ``GroundTruth_Group``: neither
+    :func:`calibrate_tiers` (needs validation labels) nor
+    ``matching_engine.calibrate_tiers_from_sweep`` (needs a truth-pair sweep)
+    can run without ground truth, so there is nothing to calibrate fresh
+    cut-offs from. Loading ``models/classifier.pkl`` instead gets a
+    ``match_probability`` that transfers to new data without retraining --
+    its features (similarity scores, attribute-agreement flags) describe the
+    pair, not the dataset -- but ``high``/``medium`` were themselves
+    calibrated on the demo dataset (:data:`config.PRETRAINED_HIGH_THRESHOLD`,
+    :data:`config.PRETRAINED_EDGE_THRESHOLD`) and are a starting point, not a
+    guarantee, on a materially different catalogue.
+
+    Args:
+        high: Auto-approve cut-off on match_probability.
+        medium: Human-review cut-off; also used as the graph edge threshold.
+
+    Returns:
+        A :class:`TierThresholds` with ``calibrated=False``.
+    """
+    return TierThresholds(
+        high=high,
+        medium=medium,
+        high_precision_target=float("nan"),
+        achieved_high_precision=float("nan"),
+        achieved_high_recall=float("nan"),
+        calibrated=False,
+    )
+
+
 def fallback_tiers(
     high: float = config.FUSED_HIGH_CONFIDENCE_THRESHOLD,
     medium: float = config.FUSED_MEDIUM_CONFIDENCE_THRESHOLD,
 ) -> TierThresholds:
-    """Fixed tier cut-offs for the hand-fused score, used when there is no
-    ground truth to calibrate against.
+    """Fixed tier cut-offs for the hand-fused score -- a DEGRADED last resort.
 
-    ``config.FUSED_HIGH_CONFIDENCE_THRESHOLD`` and
-    ``config.FUSED_MEDIUM_CONFIDENCE_THRESHOLD`` exist for exactly this case:
-    a real CPSE upload has no ``GroundTruth_Group`` column, so neither
-    :func:`calibrate_tiers` (needs validation labels) nor
-    ``matching_engine.calibrate_tiers_from_sweep`` (needs a truth-pair sweep)
-    can run. The fallback routes on ``similarity.score_pairs``'s ``fused``
-    column instead of a trained ``match_probability``.
+    Used only when a dataset has no ``GroundTruth_Group`` AND
+    ``models/classifier.pkl`` is missing, so there is no trained match
+    probability available at all; see :func:`pretrained_tiers` for the
+    primary unlabelled path. MEASURED on the demo dataset with labels
+    stripped and scored against its (withheld) ground truth: at threshold
+    0.65, precision is 0.024 with 4,753 of 5,008 records merged into 467
+    clusters; the best F1 reachable across a 0.65-0.92 sweep is 0.264,
+    against 0.897 for the trained-classifier path. The fused score does not
+    separate classes well enough to survive transitive chaining in
+    clustering. Callers must warn the user plainly when this path is in use.
 
     Args:
         high: Auto-approve cut-off on the fused score.
@@ -611,6 +648,26 @@ def load_model(path=None) -> Pipeline:
             f"No classifier at {path}. Run `python -m src.classifier` to train one."
         )
     return joblib.load(path)
+
+
+def load_model_or_none(path=None) -> Pipeline | None:
+    """Load the shipped pre-trained classifier, or None if it isn't there.
+
+    Used by the unlabelled pipeline path to decide between the pre-trained
+    ``match_probability`` (:func:`pretrained_tiers`) and the degraded
+    hand-fused fallback (:func:`fallback_tiers`) when there is no ground
+    truth to train a fresh model from.
+
+    Args:
+        path: Source; defaults to ``config.CLASSIFIER_PATH``.
+
+    Returns:
+        The fitted pipeline, or None if no artifact exists.
+    """
+    try:
+        return load_model(path)
+    except FileNotFoundError:
+        return None
 
 
 if __name__ == "__main__":  # pragma: no cover - trains and saves the artifact
