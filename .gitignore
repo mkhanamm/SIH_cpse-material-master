@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.ipynb_checkpoints/
+.pytest_cache/
+.DS_Store
+
+# Runtime artifacts: keep the folder, not the generated data
+outputs/*
+!outputs/.gitkeep
+
+# Trained model artifact is regenerable via `python -m src.classifier`
+models/*.pkl
+!models/.gitkeep
+
+# Cached embeddings
+*.npy
