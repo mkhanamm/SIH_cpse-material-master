@@ -192,6 +192,14 @@ CONSOLIDATION_PRICE_BENEFIT_PCT = 0.03  # volume leverage from consolidated dema
 # ---------------------------------------------------------------------------
 # Reproducibility
 # ---------------------------------------------------------------------------
+# Review-feedback tuning. The review queue is uncertainty-sampled, so
+# reviewer-labelled pairs cluster around the decision boundary and are NOT a
+# representative sample of the score distribution. Fitting a global threshold
+# to them naively moved it 0.55 -> 0.19 and cost ~2 points of F1, so the
+# recalibration is blended and gated on a minimum label count.
+MIN_REVIEW_LABELS_FOR_RECALIBRATION = 100
+REVIEW_RECALIBRATION_BLEND = 0.25
+
 RANDOM_SEED = 42
 # Ground-truth groups are split three ways, never pairs -- see
 # classifier.group_disjoint_split. Validation exists so the decision threshold

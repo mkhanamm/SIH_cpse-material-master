@@ -154,12 +154,23 @@ def build_features(scored_pairs: pd.DataFrame) -> tuple[np.ndarray, list[str]]:
     return frame.to_numpy(), list(FEATURE_COLUMNS)
 
 
-def label_pairs(scored_pairs: pd.DataFrame, eval_df: pd.DataFrame) -> np.ndarray:
-    """Label each candidate pair as duplicate or not from the ground truth.
+def label_pairs(
+    scored_pairs: pd.DataFrame,
+    eval_df: pd.DataFrame,
+    reviewer_label_column: str | None = None,
+) -> np.ndarray:
+    """Label each candidate pair as duplicate or not.
+
+    Labels come from ``GroundTruth_Group`` unless a reviewer has ruled on the
+    pair, in which case the reviewer's verdict wins. In production there is no
+    ground-truth column at all and the reviewer is the only label source, so the
+    override is the primary path rather than an exception to it.
 
     Args:
         scored_pairs: Output of ``similarity.score_pairs``.
         eval_df: Evaluation frame carrying ``GroundTruth_Group``.
+        reviewer_label_column: Optional column holding reviewer labels, where
+            ``-1`` means "not reviewed".
 
     Returns:
         Integer array of 0/1 labels aligned with ``scored_pairs``.
@@ -167,7 +178,13 @@ def label_pairs(scored_pairs: pd.DataFrame, eval_df: pd.DataFrame) -> np.ndarray
     groups = eval_df["GroundTruth_Group"]
     left = groups.reindex(scored_pairs["idx_a"]).to_numpy()
     right = groups.reindex(scored_pairs["idx_b"]).to_numpy()
-    return (left == right).astype(int)
+    labels = (left == right).astype(int)
+
+    if reviewer_label_column and reviewer_label_column in scored_pairs.columns:
+        reviewed = scored_pairs[reviewer_label_column].to_numpy()
+        has_verdict = reviewed >= 0
+        labels = np.where(has_verdict, reviewed, labels).astype(int)
+    return labels
 
 
 def group_disjoint_split(
@@ -387,6 +404,7 @@ def train(
     eval_df: pd.DataFrame,
     model_name: str = "gradient_boosting",
     threshold: float | None = None,
+    reviewer_label_column: str | None = None,
 ) -> tuple[Pipeline, ClassifierReport]:
     """Fit and evaluate a duplicate classifier on the scored candidate pairs.
 
@@ -407,6 +425,8 @@ def train(
         eval_df: Evaluation frame carrying ``GroundTruth_Group``.
         model_name: ``"logistic_regression"`` or ``"gradient_boosting"``.
         threshold: Fixed probability cut-off. When None, tuned on validation.
+        reviewer_label_column: Column carrying human verdicts that override the
+            ground-truth label; see :func:`label_pairs`.
 
     Returns:
         ``(fitted_pipeline, report)``.
@@ -415,10 +435,14 @@ def train(
         ValueError: On an unknown ``model_name``.
     """
     X, feature_names = build_features(scored_pairs)
-    y = label_pairs(scored_pairs, eval_df)
+    y = label_pairs(scored_pairs, eval_df, reviewer_label_column)
     train_mask, val_mask, test_mask, n_discarded = group_disjoint_split(
         scored_pairs, eval_df
     )
+    # Evaluation always uses ground truth, never reviewer verdicts: scoring the
+    # model against the labels it was just handed would guarantee improvement
+    # and measure nothing.
+    y_eval = label_pairs(scored_pairs, eval_df)
 
     if model_name == "logistic_regression":
         estimator = LogisticRegression(
@@ -458,7 +482,7 @@ def train(
 
     probabilities = pipeline.predict_proba(X[test_mask])[:, 1]
     predictions = (probabilities >= threshold).astype(int)
-    y_test = y[test_mask]
+    y_test = y_eval[test_mask]
 
     precision, recall, f1, _ = precision_recall_fscore_support(
         y_test, predictions, average="binary", zero_division=0
