@@ -325,6 +325,13 @@ def view_load_data() -> None:
         "Headers that already match a required or optional name are "
         "pre-selected."
     )
+    st.caption(
+        "CPSE is the company that owns the code, CPSE Material Code is "
+        "that company's own part number, Material Category is the type of "
+        "item, and Raw Description is the free-text description the "
+        "system reads. Sector is optional but improves the national code "
+        "format."
+    )
     suggested = data_loading.suggest_column_mapping(list(raw_df.columns))
     options = ["-- none --", *raw_df.columns]
 
