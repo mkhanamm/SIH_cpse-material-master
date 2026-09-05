@@ -215,6 +215,23 @@ def session_state_defaults() -> None:
     st.session_state.setdefault("registry", cnmc_generator.CNMCRegistry())
     st.session_state.setdefault("audit", governance.AuditLog(load=False))
     st.session_state.setdefault("pipeline_run", False)
+    st.session_state.setdefault("pending_view", None)
+
+
+def _apply_pending_view_change() -> None:
+    """Consume a requested view jump, if any, before the view radio renders.
+
+    Streamlit forbids writing to a widget-bound session-state key (like the
+    view radio's) after that widget has already been instantiated in the
+    current script run -- so a button inside a view function can't jump
+    straight to another view by setting ``view_choice`` itself. Instead it
+    sets ``pending_view`` (a plain, non-widget key) and calls ``st.rerun()``;
+    this, called at the very top of ``main()`` on the resulting rerun,
+    applies that request before the radio widget is created.
+    """
+    if st.session_state.pending_view is not None:
+        st.session_state.view_choice = st.session_state.pending_view
+        st.session_state.pending_view = None
 
 
 def _set_active_dataset(dataset: ingestion.MaterialDataset, token: str) -> None:
@@ -269,6 +286,46 @@ def _format_seconds(seconds: float) -> str:
     if seconds < 90:
         return f"~{seconds:.0f}s"
     return f"~{seconds / 60:.1f} min"
+
+
+def _reset_session() -> None:
+    """Clear every cached artifact and mutable session entry, for the
+    sidebar's "Start over / load a different dataset" button.
+
+    Clears ``st.cache_resource`` (so ``load_everything``/``run_pipeline``
+    recompute from scratch for whatever is loaded next), drops the active
+    dataset so "Load Data" shows the source picker rather than an
+    already-loaded dataset, and resets every other piece of mutable session
+    state (decisions, registry, audit log, pipeline_run) -- the same reset
+    :func:`_set_active_dataset` does when swapping datasets, minus setting a
+    new one. Does not itself rerun the app; call ``st.rerun()`` after.
+    """
+    st.cache_resource.clear()
+    st.session_state.dataset = None
+    st.session_state.dataset_token = None
+    st.session_state.pipeline_run = False
+    st.session_state.decisions = []
+    st.session_state.registry = cnmc_generator.CNMCRegistry()
+    st.session_state.audit = governance.AuditLog(load=False)
+    st.session_state.pop("data_source_choice", None)
+    st.session_state.pending_view = VIEWS[0]
+
+
+def _pipeline_not_run_yet(what_this_view_shows: str) -> None:
+    """Friendly placeholder for a view that needs a completed pipeline run.
+
+    Replaces a bare "run the pipeline first" warning with a description of
+    what will actually appear here, plus a direct way to get there, instead
+    of just naming the view the user has to go find themselves.
+
+    Args:
+        what_this_view_shows: One sentence, present tense, describing what
+            this view shows once the pipeline has run.
+    """
+    st.info(f"Once you've run the pipeline, this view will show {what_this_view_shows}")
+    if st.button("Go to Run Matching", key="goto_run_matching"):
+        st.session_state.pending_view = VIEWS[2]
+        st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -645,7 +702,10 @@ def view_review_match() -> None:
     """Show a full per-attribute explanation for one chosen cluster."""
     st.header("Why did the system propose this match?")
     if not st.session_state.pipeline_run:
-        st.warning("Run the pipeline first, on the '3. Run Matching' view.")
+        _pipeline_not_run_yet(
+            "a per-attribute explanation for one proposed cluster you "
+            "choose, alongside its confidence tier and internal scores."
+        )
         return
 
     _, joined, _, _ = load_everything(*_active_dataset_args())
@@ -700,7 +760,11 @@ def view_human_review() -> None:
     """Approve, reject or edit queued clusters and show the feedback effect."""
     st.header("Human review queue")
     if not st.session_state.pipeline_run:
-        st.warning("Run the pipeline first, on the '3. Run Matching' view.")
+        _pipeline_not_run_yet(
+            "the medium-confidence review queue, where you can approve, "
+            "reject or edit proposed matches and see the effect of "
+            "feedback on accuracy."
+        )
         return
 
     dataset, joined, _, _ = load_everything(*_active_dataset_args())
@@ -820,7 +884,11 @@ def view_national_code() -> None:
     """Assign national codes to approved clusters and show the mapping."""
     st.header("Common National Material Code")
     if not st.session_state.pipeline_run:
-        st.warning("Run the pipeline first, on the '3. Run Matching' view.")
+        _pipeline_not_run_yet(
+            "assignment of national codes to auto-approved clusters, the "
+            "resulting mapping table, legacy-code lookup and the append-only "
+            "audit trail."
+        )
         return
 
     _, joined, _, _ = load_everything(*_active_dataset_args())
@@ -927,7 +995,10 @@ def view_dashboard() -> None:
     """Programme-level totals, accuracy and a clearly-caveated savings estimate."""
     st.header("Programme dashboard")
     if not st.session_state.pipeline_run:
-        st.warning("Run the pipeline first, on the '3. Run Matching' view.")
+        _pipeline_not_run_yet(
+            "programme-level totals, accuracy against ground truth (when "
+            "available) and an estimated procurement-savings figure."
+        )
         return
 
     dataset, joined, _, _ = load_everything(*_active_dataset_args())
@@ -1030,10 +1101,16 @@ def view_dashboard() -> None:
 def main() -> None:
     """Render the sidebar and dispatch to the selected view."""
     session_state_defaults()
+    _apply_pending_view_change()
 
     st.sidebar.title("National Unified Material Master")
     st.sidebar.caption("AI-driven standardization of material codes across CPSEs")
-    view = st.sidebar.radio("View", VIEWS)
+    view = st.sidebar.radio("View", VIEWS, key="view_choice")
+
+    st.sidebar.divider()
+    if st.sidebar.button("Start over / load a different dataset"):
+        _reset_session()
+        st.rerun()
 
     st.sidebar.divider()
     st.sidebar.caption(
