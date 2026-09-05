@@ -341,20 +341,25 @@ def ground_truth_summary(
 
 
 def find_cross_cpse_examples(
-    dataset: MaterialDataset, limit: int = 5, require_distinct_text: bool = True
+    dataset: MaterialDataset,
+    limit: int | None = 5,
+    require_distinct_text: bool = True,
 ) -> list[pd.DataFrame]:
     """Pull real cross-CPSE duplicate groups for the app's "The Problem" view.
 
     Args:
         dataset: The ingested dataset.
-        limit: Maximum number of example groups to return.
+        limit: Maximum number of example groups to return; None for every
+            qualifying group (e.g. so the caller can filter by sector or
+            category and still have enough to choose from).
         require_distinct_text: When True, only return groups where every raw
             description is textually different -- these are the persuasive
             examples, since an exact string match needs no AI to find.
 
     Returns:
-        A list of small frames, each one equivalence group, with the CPSE code,
-        raw description and standardized description side by side.
+        A list of small frames, each one equivalence group, with the Sector,
+        CPSE code, Material Category, raw description and standardized
+        description side by side.
 
     Raises:
         ValueError: If ``dataset.has_labels`` is False.
@@ -378,6 +383,7 @@ def find_cross_cpse_examples(
         examples.append(
             group[
                 [
+                    "Sector",
                     "CPSE",
                     "CPSE Material Code",
                     "Material Category",
@@ -386,7 +392,7 @@ def find_cross_cpse_examples(
                 ]
             ]
         )
-        if len(examples) >= limit:
+        if limit is not None and len(examples) >= limit:
             break
     return examples
 

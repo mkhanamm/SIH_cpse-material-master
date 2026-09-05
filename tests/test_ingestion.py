@@ -103,6 +103,28 @@ class TestGroundTruthHelpersRequireLabels:
         assert pairs == {(0, 1), (2, 3)}
 
 
+class TestFindCrossCpseExamples:
+    """Examples feeding the 'The Problem' view's tables and filters."""
+
+    def test_includes_sector_and_category_columns(self, labelled_path):
+        dataset = ingestion.load_dataset(labelled_path)
+        examples = ingestion.find_cross_cpse_examples(dataset)
+        assert examples
+        for example in examples:
+            assert "Sector" in example.columns
+            assert "Material Category" in example.columns
+
+    def test_limit_caps_the_number_of_examples(self, labelled_path):
+        dataset = ingestion.load_dataset(labelled_path)
+        examples = ingestion.find_cross_cpse_examples(dataset, limit=1)
+        assert len(examples) == 1
+
+    def test_limit_none_returns_every_qualifying_group(self, labelled_path):
+        dataset = ingestion.load_dataset(labelled_path)
+        examples = ingestion.find_cross_cpse_examples(dataset, limit=None)
+        assert len(examples) == 2  # both G1 (rows 0,1) and G2 (rows 2,3) qualify
+
+
 class TestSampleDataset:
     """A large upload must still be demoable -- see the 'Load Data' view."""
 

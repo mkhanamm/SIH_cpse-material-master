@@ -413,13 +413,29 @@ def view_problem() -> None:
         "Procurement cannot aggregate demand it cannot see."
     )
 
+    st.subheader("How the loaded data is structured")
+    st.caption(
+        "Every record belongs to one CPSE and one sector -- a sector groups "
+        "related CPSEs (e.g. every oil & gas company)."
+    )
+    structure_columns = st.columns(2)
+    with structure_columns[0]:
+        st.write("**Records by sector**")
+        st.bar_chart(
+            pd.Series(dataset.profile.rows_per_sector).sort_values(ascending=False)
+        )
+    with structure_columns[1]:
+        st.write("**Records by CPSE**")
+        st.bar_chart(
+            pd.Series(dataset.profile.rows_per_cpse).sort_values(ascending=False)
+        )
+
     if not dataset.has_labels:
         st.info(
-            "This view illustrates the problem using the dataset's "
-            "ground-truth labels (`GroundTruth_Group`). The loaded dataset "
-            "has none, so these worked examples are unavailable -- every "
-            "other view (matching, review, national code generation, "
-            "dashboard) still runs normally."
+            "The worked examples below use the dataset's ground-truth "
+            "labels (`GroundTruth_Group`). The loaded dataset has none, so "
+            "they are unavailable -- every other view (matching, review, "
+            "national code generation, dashboard) still runs normally."
         )
         return
 
@@ -434,9 +450,45 @@ def view_problem() -> None:
     st.subheader("Real examples from the loaded data")
     st.caption(
         "Every description below is textually different from the others in its "
-        "group. Exact string matching finds none of these."
+        "group. Exact string matching finds none of these. Sector and "
+        "Material Category are shown so it's clear how materials are "
+        "categorised."
     )
-    for example in ingestion.find_cross_cpse_examples(dataset, limit=4):
+
+    examples = ingestion.find_cross_cpse_examples(dataset, limit=None)
+    if not examples:
+        st.info("No cross-CPSE duplicate examples with distinct text were found.")
+        return
+
+    sectors = sorted({example["Sector"].iat[0] for example in examples})
+    categories = sorted({example["Material Category"].iat[0] for example in examples})
+
+    filter_columns = st.columns(2)
+    sector_choice = filter_columns[0].selectbox("Filter by sector", ["All"] + sectors)
+    category_choice = filter_columns[1].selectbox(
+        "Filter by category", ["All"] + categories
+    )
+
+    filtered = [
+        example
+        for example in examples
+        if sector_choice in ("All", example["Sector"].iat[0])
+        and category_choice in ("All", example["Material Category"].iat[0])
+    ]
+
+    if not filtered:
+        st.info(
+            f"No examples match Sector={sector_choice!r}, "
+            f"Category={category_choice!r}. Try a different combination."
+        )
+
+    for example in filtered[:6]:
+        n_codes = len(example)
+        n_companies = example["CPSE"].nunique()
+        st.write(
+            f"**The same material, coded {n_codes} different ways by "
+            f"{n_companies} companies**"
+        )
         st.dataframe(example, width="stretch", hide_index=True)
 
     st.info(
