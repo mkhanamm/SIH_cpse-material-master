@@ -6,13 +6,14 @@ WHAT THIS FILE DOES
     no business logic, so the pipeline can be run, tested and reviewed without
     Streamlit, and the app cannot silently diverge from the library.
 
-    Six views:
-      1. The Problem            - real cross-CPSE duplicate examples from the data
-      2. Run Matching           - executes the pipeline, shows blocking speedup
-      3. Review a Match         - per-attribute explanation for a chosen cluster
-      4. Human Review           - approve/reject/edit + active-learning recalibration
-      5. National Code Generated- CNMC assignment and the mapping table
-      6. Dashboard              - duplicate rate, cross-CPSE count, savings estimate
+    Seven views:
+      1. Load Data              - pick the demo dataset or upload and map your own
+      2. The Problem            - real cross-CPSE duplicate examples from the data
+      3. Run Matching           - executes the pipeline, shows blocking speedup
+      4. Review a Match         - per-attribute explanation for a chosen cluster
+      5. Human Review           - approve/reject/edit + active-learning recalibration
+      6. National Code Generated- CNMC assignment and the mapping table
+      7. Dashboard              - duplicate rate, cross-CPSE count, savings estimate
 
 RUN
     streamlit run app.py
@@ -24,6 +25,7 @@ import pandas as pd
 import streamlit as st
 
 from src import attribute_extraction, blocking, classifier, config, cnmc_generator
+from src import data_loading
 from src import explanation as explain
 from src import governance, ingestion, matching_engine, review_workflow, similarity
 from src.normalization import normalize_series
@@ -35,12 +37,13 @@ st.set_page_config(
 )
 
 VIEWS = [
-    "1. The Problem",
-    "2. Run Matching",
-    "3. Review a Match",
-    "4. Human Review",
-    "5. National Code Generated",
-    "6. Dashboard",
+    "1. Load Data",
+    "2. The Problem",
+    "3. Run Matching",
+    "4. Review a Match",
+    "5. Human Review",
+    "6. National Code Generated",
+    "7. Dashboard",
 ]
 
 SYSTEM_ACTOR = "auto-matcher"
@@ -49,17 +52,26 @@ SYSTEM_ACTOR = "auto-matcher"
 # ---------------------------------------------------------------------------
 # Cached pipeline stages
 # ---------------------------------------------------------------------------
-@st.cache_resource(show_spinner="Loading material master...")
-def load_everything():
-    """Run ingestion, normalization and attribute extraction once per session.
+@st.cache_resource(show_spinner="Normalizing and extracting attributes...")
+def load_everything(_dataset: ingestion.MaterialDataset, dataset_token: str):
+    """Run normalization and attribute extraction once per loaded dataset.
 
-    Cached because these are deterministic and take a few seconds; a judge
-    clicking between tabs should not re-pay that cost.
+    Cached on ``dataset_token`` because these are deterministic and take a
+    few seconds; a judge clicking between tabs should not re-pay that cost.
+    ``_dataset`` is excluded from the cache key (Streamlit's ``_``-prefix
+    convention) since a DataFrame-holding object is neither cheap to hash
+    nor a meaningful identity check -- ``dataset_token`` (set by
+    :func:`_set_active_dataset` whenever "Load Data" loads a new dataset) is
+    what actually determines whether this needs to re-run.
+
+    Args:
+        _dataset: The active dataset, from ``st.session_state.dataset``.
+        dataset_token: Identifies which dataset this is, for cache-busting.
 
     Returns:
         ``(dataset, joined_frame, normalized_text, extracted_attributes)``.
     """
-    dataset = ingestion.load_dataset()
+    dataset = _dataset
     extracted = attribute_extraction.extract_frame(dataset.pipeline_df)
     joined = dataset.pipeline_df.join(extracted)
     text = normalize_series(joined[config.INPUT_TEXT_COLUMN])
@@ -67,7 +79,7 @@ def load_everything():
 
 
 @st.cache_resource(show_spinner="Blocking, scoring and clustering...")
-def run_pipeline():
+def run_pipeline(_dataset: ingestion.MaterialDataset, dataset_token: str):
     """Execute blocking, similarity, classification and clustering.
 
     Two paths, chosen by ``dataset.has_labels``:
@@ -106,7 +118,7 @@ def run_pipeline():
         metrics (None if unlabelled), ``has_labels``, ``degraded_fallback``
         and ``backend_mismatch`` (None unless a genuine mismatch was found).
     """
-    dataset, joined, text, extracted = load_everything()
+    dataset, joined, text, extracted = load_everything(_dataset, dataset_token)
     candidates = blocking.candidate_pairs(joined)
     scored = similarity.score_pairs(joined, candidates.pairs, text)
 
@@ -197,18 +209,193 @@ def run_pipeline():
 
 def session_state_defaults() -> None:
     """Initialise mutable session state used across views."""
+    st.session_state.setdefault("dataset", None)
+    st.session_state.setdefault("dataset_token", None)
     st.session_state.setdefault("decisions", [])
     st.session_state.setdefault("registry", cnmc_generator.CNMCRegistry())
     st.session_state.setdefault("audit", governance.AuditLog(load=False))
     st.session_state.setdefault("pipeline_run", False)
 
 
+def _set_active_dataset(dataset: ingestion.MaterialDataset, token: str) -> None:
+    """Replace the active dataset and reset everything that assumed the old one.
+
+    Args:
+        dataset: The newly loaded dataset (demo or mapped upload).
+        token: Cache-busting identity for :func:`load_everything` /
+            :func:`run_pipeline` -- must change whenever the dataset changes.
+    """
+    st.session_state.dataset = dataset
+    st.session_state.dataset_token = token
+    st.session_state.pipeline_run = False
+    st.session_state.decisions = []
+    st.session_state.registry = cnmc_generator.CNMCRegistry()
+    st.session_state.audit = governance.AuditLog(load=False)
+
+
+def _require_dataset() -> bool:
+    """Show a warning and report failure if no dataset has been loaded yet.
+
+    Returns:
+        True if a dataset is loaded and the caller may proceed.
+    """
+    if st.session_state.dataset is None:
+        st.warning("Load a dataset first, on the '1. Load Data' view.")
+        return False
+    return True
+
+
+def _active_dataset_args() -> tuple[ingestion.MaterialDataset, str]:
+    """Arguments for ``load_everything``/``run_pipeline``: (dataset, token).
+
+    Callers must check :func:`_require_dataset` first -- this does not
+    itself guard against ``st.session_state.dataset`` being None.
+
+    Returns:
+        The active dataset and its cache-busting token.
+    """
+    return st.session_state.dataset, st.session_state.dataset_token
+
+
+def _format_seconds(seconds: float) -> str:
+    """Render an estimated duration for the "Load Data" view.
+
+    Args:
+        seconds: Estimated seconds.
+
+    Returns:
+        ``"~<n>s"`` under 90 seconds, otherwise ``"~<n> min"``.
+    """
+    if seconds < 90:
+        return f"~{seconds:.0f}s"
+    return f"~{seconds / 60:.1f} min"
+
+
 # ---------------------------------------------------------------------------
-# View 1 -- The Problem
+# View 1 -- Load Data
+# ---------------------------------------------------------------------------
+def view_load_data() -> None:
+    """Pick the demo dataset, or upload and map a real CPSE export."""
+    st.header("Load a material master")
+    st.write(
+        "Everything downstream reads from whatever is loaded here: the "
+        "bundled SIH demo dataset, or your own export mapped onto the same "
+        "columns."
+    )
+
+    source = st.radio(
+        "Data source",
+        ["Use the SIH demo dataset", "Upload your own"],
+        key="data_source_choice",
+    )
+
+    if source == "Use the SIH demo dataset":
+        if st.session_state.dataset_token != "demo":
+            with st.spinner("Loading the demo dataset..."):
+                _set_active_dataset(ingestion.load_dataset(), "demo")
+        dataset = st.session_state.dataset
+        st.success(
+            f"Demo dataset loaded: {dataset.profile.n_rows:,} records, "
+            f"{dataset.profile.n_cpses} CPSEs, {dataset.profile.n_categories} "
+            "material categories. Continue to '2. The Problem' or "
+            "'3. Run Matching'."
+        )
+        return
+
+    uploaded = st.file_uploader("Upload a material master", type=["xlsx", "csv"])
+    if uploaded is None:
+        st.info("Choose a .xlsx or .csv file to continue.")
+        return
+
+    try:
+        raw_df = data_loading.read_upload(uploaded, uploaded.name)
+    except (data_loading.UnsupportedFileType, ValueError) as error:
+        st.error(f"Could not read `{uploaded.name}`: {error}")
+        return
+
+    st.write(f"**{len(raw_df):,} rows, {len(raw_df.columns)} columns** in `{uploaded.name}`.")
+    st.subheader("Preview (first 10 rows)")
+    st.dataframe(raw_df.head(10), width="stretch")
+
+    st.subheader("Map your columns")
+    st.caption(
+        "Required: CPSE, CPSE Material Code, Material Category, Raw "
+        "Description. Optional: Sector and the five attribute columns -- "
+        "leave any of these as '-- none --' if your file doesn't have them. "
+        "Headers that already match a required or optional name are "
+        "pre-selected."
+    )
+    suggested = data_loading.suggest_column_mapping(list(raw_df.columns))
+    options = ["-- none --", *raw_df.columns]
+
+    def _mapping_selectbox(target: str) -> str | None:
+        default = suggested.get(target)
+        index = options.index(default) if default in options else 0
+        choice = st.selectbox(target, options, index=index, key=f"col_map_{target}")
+        return None if choice == "-- none --" else choice
+
+    st.write("**Required**")
+    mapping = {target: _mapping_selectbox(target) for target in data_loading.REQUIRED_COLUMNS}
+    st.write("**Optional**")
+    mapping.update(
+        {target: _mapping_selectbox(target) for target in data_loading.OPTIONAL_COLUMNS}
+    )
+
+    missing_required = [t for t in data_loading.REQUIRED_COLUMNS if not mapping.get(t)]
+    if missing_required:
+        st.warning(f"Map the required column(s) first: {', '.join(missing_required)}.")
+        return
+
+    n_rows = len(raw_df)
+    estimate = data_loading.estimate_runtime_seconds(n_rows)
+    st.subheader("Before you run it")
+    columns = st.columns(2)
+    columns[0].metric("Rows", f"{n_rows:,}")
+    columns[1].metric("Estimated pipeline runtime", _format_seconds(estimate))
+
+    n_sample = n_rows
+    if n_rows > config.LARGE_DATASET_WARNING_ROWS:
+        st.warning(
+            f"{n_rows:,} rows is large. Comparisons -- and therefore "
+            "runtime -- grow faster than linearly with record count "
+            f"(measured: {config.RUNTIME_BASELINE_ROWS:,} records in about "
+            f"{config.RUNTIME_BASELINE_SECONDS}s), so a full run here is "
+            f"estimated at {_format_seconds(estimate)}. Sample a subset for "
+            "a faster demo."
+        )
+        if st.checkbox("Sample a subset of rows", value=True):
+            n_sample = st.slider(
+                "Sample size",
+                min_value=1_000,
+                max_value=n_rows,
+                value=min(config.LARGE_DATASET_WARNING_ROWS, n_rows),
+                step=1_000,
+            )
+            st.caption(
+                f"Estimated runtime at {n_sample:,} rows: "
+                f"{_format_seconds(data_loading.estimate_runtime_seconds(n_sample))}."
+            )
+
+    if st.button("Load this dataset", type="primary"):
+        mapped_df = data_loading.apply_column_mapping(raw_df, mapping)
+        dataset = data_loading.build_dataset_from_mapped(mapped_df, uploaded.name)
+        if n_sample < len(dataset.pipeline_df):
+            dataset = ingestion.sample_dataset(dataset, n_sample)
+        _set_active_dataset(dataset, f"upload:{uploaded.name}:{n_sample}")
+        st.success(
+            f"Loaded {dataset.profile.n_rows:,} records from `{uploaded.name}`. "
+            "Continue to '2. The Problem' or '3. Run Matching'."
+        )
+
+
+# ---------------------------------------------------------------------------
+# View 2 -- The Problem
 # ---------------------------------------------------------------------------
 def view_problem() -> None:
     """Show real cross-CPSE duplicates so the pain precedes the solution."""
-    dataset, joined, _, _ = load_everything()
+    if not _require_dataset():
+        return
+    dataset, joined, _, _ = load_everything(*_active_dataset_args())
 
     st.header("The same material, coded differently by every enterprise")
     st.write(
@@ -253,11 +440,13 @@ def view_problem() -> None:
 
 
 # ---------------------------------------------------------------------------
-# View 2 -- Run Matching
+# View 3 -- Run Matching
 # ---------------------------------------------------------------------------
 def view_run_matching() -> None:
     """Execute the pipeline and show cost and quality side by side."""
     st.header("Run the matching pipeline")
+    if not _require_dataset():
+        return
     st.write(
         "Ingestion to clustering, on the full loaded master. The blocking "
         "figures are the reason this is feasible at national scale."
@@ -265,7 +454,7 @@ def view_run_matching() -> None:
 
     if st.button("Run pipeline", type="primary") or st.session_state.pipeline_run:
         st.session_state.pipeline_run = True
-        artifacts = run_pipeline()
+        artifacts = run_pipeline(*_active_dataset_args())
         has_labels = artifacts["has_labels"]
         stats = artifacts["blocking"]
 
@@ -391,17 +580,17 @@ def view_run_matching() -> None:
 
 
 # ---------------------------------------------------------------------------
-# View 3 -- Review a Match
+# View 4 -- Review a Match
 # ---------------------------------------------------------------------------
 def view_review_match() -> None:
     """Show a full per-attribute explanation for one chosen cluster."""
     st.header("Why did the system propose this match?")
     if not st.session_state.pipeline_run:
-        st.warning("Run the pipeline first, on the 'Run Matching' view.")
+        st.warning("Run the pipeline first, on the '3. Run Matching' view.")
         return
 
-    _, joined, _, _ = load_everything()
-    artifacts = run_pipeline()
+    _, joined, _, _ = load_everything(*_active_dataset_args())
+    artifacts = run_pipeline(*_active_dataset_args())
     clusters = [c for c in artifacts["result"].clusters if c.is_cross_cpse]
 
     if not clusters:
@@ -446,17 +635,17 @@ def view_review_match() -> None:
 
 
 # ---------------------------------------------------------------------------
-# View 4 -- Human Review
+# View 5 -- Human Review
 # ---------------------------------------------------------------------------
 def view_human_review() -> None:
     """Approve, reject or edit queued clusters and show the feedback effect."""
     st.header("Human review queue")
     if not st.session_state.pipeline_run:
-        st.warning("Run the pipeline first, on the 'Run Matching' view.")
+        st.warning("Run the pipeline first, on the '3. Run Matching' view.")
         return
 
-    dataset, joined, _, _ = load_everything()
-    artifacts = run_pipeline()
+    dataset, joined, _, _ = load_everything(*_active_dataset_args())
+    artifacts = run_pipeline(*_active_dataset_args())
     queue = review_workflow.build_queue(
         artifacts["result"].clusters, artifacts["tiers"].medium
     )
@@ -566,17 +755,17 @@ def view_human_review() -> None:
 
 
 # ---------------------------------------------------------------------------
-# View 5 -- National Code Generated
+# View 6 -- National Code Generated
 # ---------------------------------------------------------------------------
 def view_national_code() -> None:
     """Assign national codes to approved clusters and show the mapping."""
     st.header("Common National Material Code")
     if not st.session_state.pipeline_run:
-        st.warning("Run the pipeline first, on the 'Run Matching' view.")
+        st.warning("Run the pipeline first, on the '3. Run Matching' view.")
         return
 
-    _, joined, _, _ = load_everything()
-    artifacts = run_pipeline()
+    _, joined, _, _ = load_everything(*_active_dataset_args())
+    artifacts = run_pipeline(*_active_dataset_args())
     registry = st.session_state.registry
     audit = st.session_state.audit
 
@@ -673,17 +862,17 @@ def view_national_code() -> None:
 
 
 # ---------------------------------------------------------------------------
-# View 6 -- Dashboard
+# View 7 -- Dashboard
 # ---------------------------------------------------------------------------
 def view_dashboard() -> None:
     """Programme-level totals, accuracy and a clearly-caveated savings estimate."""
     st.header("Programme dashboard")
     if not st.session_state.pipeline_run:
-        st.warning("Run the pipeline first, on the 'Run Matching' view.")
+        st.warning("Run the pipeline first, on the '3. Run Matching' view.")
         return
 
-    dataset, joined, _, _ = load_everything()
-    artifacts = run_pipeline()
+    dataset, joined, _, _ = load_everything(*_active_dataset_args())
+    artifacts = run_pipeline(*_active_dataset_args())
     result = artifacts["result"]
     metrics = artifacts["metrics"]
 
@@ -796,12 +985,13 @@ def main() -> None:
         st.sidebar.metric("Decisions this session", len(st.session_state.decisions))
 
     {
-        VIEWS[0]: view_problem,
-        VIEWS[1]: view_run_matching,
-        VIEWS[2]: view_review_match,
-        VIEWS[3]: view_human_review,
-        VIEWS[4]: view_national_code,
-        VIEWS[5]: view_dashboard,
+        VIEWS[0]: view_load_data,
+        VIEWS[1]: view_problem,
+        VIEWS[2]: view_run_matching,
+        VIEWS[3]: view_review_match,
+        VIEWS[4]: view_human_review,
+        VIEWS[5]: view_national_code,
+        VIEWS[6]: view_dashboard,
     }[view]()
 
 

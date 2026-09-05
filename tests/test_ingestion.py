@@ -101,3 +101,57 @@ class TestGroundTruthHelpersRequireLabels:
         dataset = ingestion.load_dataset(labelled_path)
         pairs = ingestion.ground_truth_pairs(dataset.eval_df)
         assert pairs == {(0, 1), (2, 3)}
+
+
+class TestSampleDataset:
+    """A large upload must still be demoable -- see the 'Load Data' view."""
+
+    def test_sample_reduces_row_count(self, unlabelled_path):
+        dataset = ingestion.load_dataset(unlabelled_path)
+        sampled = ingestion.sample_dataset(dataset, 2, seed=0)
+        assert len(sampled.pipeline_df) == 2
+
+    def test_sample_reindexes_from_zero(self, unlabelled_path):
+        """Downstream code uses positional index as the record id."""
+        dataset = ingestion.load_dataset(unlabelled_path)
+        sampled = ingestion.sample_dataset(dataset, 2, seed=0)
+        assert list(sampled.pipeline_df.index) == [0, 1]
+
+    def test_eval_df_stays_aligned_with_pipeline_df(self, labelled_path):
+        """Sampling must not desynchronize a record from its label."""
+        dataset = ingestion.load_dataset(labelled_path)
+        sampled = ingestion.sample_dataset(dataset, 2, seed=0)
+        assert len(sampled.eval_df) == len(sampled.pipeline_df)
+
+    def test_n_larger_than_dataset_returns_dataset_unchanged(self, unlabelled_path):
+        dataset = ingestion.load_dataset(unlabelled_path)
+        assert ingestion.sample_dataset(dataset, 1000) is dataset
+
+    def test_n_below_one_is_clamped(self, unlabelled_path):
+        dataset = ingestion.load_dataset(unlabelled_path)
+        sampled = ingestion.sample_dataset(dataset, 0, seed=0)
+        assert len(sampled.pipeline_df) == 1
+
+    def test_profile_recomputed_on_the_sample(self, unlabelled_path):
+        dataset = ingestion.load_dataset(unlabelled_path)
+        sampled = ingestion.sample_dataset(dataset, 2, seed=0)
+        assert sampled.profile.n_rows == 2
+
+    def test_has_labels_and_source_path_carried_over(self, labelled_path):
+        dataset = ingestion.load_dataset(labelled_path)
+        sampled = ingestion.sample_dataset(dataset, 2, seed=0)
+        assert sampled.has_labels == dataset.has_labels
+        assert sampled.source_path == dataset.source_path
+
+    def test_sample_is_reproducible_with_the_same_seed(self, unlabelled_path):
+        dataset = ingestion.load_dataset(unlabelled_path)
+        first = ingestion.sample_dataset(dataset, 2, seed=7)
+        second = ingestion.sample_dataset(dataset, 2, seed=7)
+        assert list(first.pipeline_df["CPSE Material Code"]) == list(
+            second.pipeline_df["CPSE Material Code"]
+        )
+
+    def test_leakage_guard_still_holds_after_sampling(self, labelled_path):
+        dataset = ingestion.load_dataset(labelled_path)
+        sampled = ingestion.sample_dataset(dataset, 2, seed=0)
+        sampled.assert_no_leakage()  # must not raise

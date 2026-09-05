@@ -21,6 +21,7 @@ KEY FUNCTIONS
     load_dataset(path)          -> MaterialDataset
     profile_dataframe(df)       -> ProfileStats
     ground_truth_pairs(eval_df) -> set[tuple[int, int]]
+    sample_dataset(dataset, n)  -> MaterialDataset
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ import itertools
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from . import config
@@ -176,6 +178,51 @@ def load_dataset(path: Path | str | None = None) -> MaterialDataset:
     )
     dataset.assert_no_leakage()
     return dataset
+
+
+def sample_dataset(
+    dataset: MaterialDataset, n: int, seed: int = config.RANDOM_SEED
+) -> MaterialDataset:
+    """Randomly subsample a dataset's records, so a large upload stays demoable.
+
+    Positional index is the record id every downstream module relies on
+    (blocking, similarity, clustering all key off it), so the sample is
+    reindexed 0..n-1 rather than keeping the original, now-gappy positions.
+
+    Args:
+        dataset: The dataset to sample from.
+        n: Target sample size; clamped to between 1 and the dataset's row
+            count.
+        seed: RNG seed, for a reproducible sample.
+
+    Returns:
+        A new :class:`MaterialDataset` with ``pipeline_df``/``eval_df``
+        sampled and reindexed, and ``profile`` recomputed on the sample.
+        ``sector_reference``, ``source_path`` and ``has_labels`` are carried
+        over unchanged. Returns ``dataset`` itself, unmodified, if ``n``
+        already covers every record.
+    """
+    n_total = len(dataset.pipeline_df)
+    n = max(1, min(n, n_total))
+    if n == n_total:
+        return dataset
+
+    positions = np.sort(
+        np.random.default_rng(seed).choice(n_total, size=n, replace=False)
+    )
+    pipeline_sample = dataset.pipeline_df.iloc[positions].reset_index(drop=True)
+    eval_sample = dataset.eval_df.iloc[positions].reset_index(drop=True)
+
+    sampled = MaterialDataset(
+        pipeline_df=pipeline_sample,
+        eval_df=eval_sample,
+        sector_reference=dataset.sector_reference,
+        profile=profile_dataframe(pipeline_sample),
+        source_path=dataset.source_path,
+        has_labels=dataset.has_labels,
+    )
+    sampled.assert_no_leakage()
+    return sampled
 
 
 def profile_dataframe(df: pd.DataFrame) -> ProfileStats:

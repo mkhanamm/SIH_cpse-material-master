@@ -191,6 +191,26 @@ MAX_BLOCK_SIZE = 400     # a block larger than this is sub-split; prevents one
 TOP_K_CANDIDATES = 20    # per-record candidate cap after scoring
 
 # ---------------------------------------------------------------------------
+# Upload runtime estimation ("Load Data" view)
+# ---------------------------------------------------------------------------
+# One measured point (README.md section 5): the full pipeline -- blocking
+# through clustering -- on the bundled demo dataset. Comparisons, and
+# therefore runtime, grow faster than linearly with record count: blocking
+# buckets are keyed by category (src/blocking.py), and a bigger dataset means
+# bigger buckets, not just more of them, so each bucket's internal
+# comparisons grow with the square of its own size. RUNTIME_SCALING_EXPONENT
+# extrapolates from that single measurement for the upload view's warning; it
+# is an estimate to inform a sampling decision, not a benchmarked guarantee.
+RUNTIME_BASELINE_ROWS = 5_008
+RUNTIME_BASELINE_SECONDS = 80
+RUNTIME_SCALING_EXPONENT = 1.3
+
+# Above this many rows, the "Load Data" view warns and offers to sample --
+# the super-linear growth above means a much bigger file is not just
+# proportionally slower to demo.
+LARGE_DATASET_WARNING_ROWS = 20_000
+
+# ---------------------------------------------------------------------------
 # CNMC schema
 # ---------------------------------------------------------------------------
 CNMC_PREFIX = "NM"
