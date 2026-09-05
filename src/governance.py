@@ -321,7 +321,9 @@ class AuditLog:
             if e.reverted_by is None and e.action != ROLLBACK
         ]
 
-    def version_at(self, timestamp: str) -> dict[str, dict[str, object]]:
+    def version_at(
+        self, timestamp: str, as_of_event_id: int | None = None
+    ) -> dict[str, dict[str, object]]:
         """Reconstruct the mapping state as of a point in time.
 
         Replays every event up to ``timestamp``, ignoring reversals recorded
@@ -330,20 +332,36 @@ class AuditLog:
 
         Args:
             timestamp: ISO-8601 UTC cut-off.
+            as_of_event_id: Breaks ties when more than one event shares
+                ``timestamp``. This is routine, not exotic: OS clock
+                resolution (especially on Windows) can be coarser than the
+                time between two appends, so two events legitimately get an
+                identical timestamp string. ``event_id`` is assigned in
+                append order and always totally orders the log, timestamp
+                collisions included, so pass the id of the event you mean
+                "as of" to cut off precisely at it; events sharing its
+                timestamp with a higher id are excluded. Omit to include
+                every event at ``timestamp`` (the tie-blind default).
 
         Returns:
             ``{cnmc: state}`` as of that moment.
         """
+
+        def at_or_before(event: Event) -> bool:
+            if event.timestamp != timestamp:
+                return event.timestamp < timestamp
+            return as_of_event_id is None or event.event_id <= as_of_event_id
+
         state: dict[str, dict[str, object]] = {}
         reversed_ids = {
             e.compensates
             for e in self.events
             if e.action == ROLLBACK and e.compensates is not None
-            and e.timestamp <= timestamp
+            and at_or_before(e)
         }
 
         for event in self.events:
-            if event.timestamp > timestamp or event.event_id in reversed_ids:
+            if not at_or_before(event) or event.event_id in reversed_ids:
                 continue
             if event.action == ROLLBACK:
                 if event.before:

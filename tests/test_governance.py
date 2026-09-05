@@ -136,8 +136,29 @@ class TestIntegrity:
 
 class TestVersioning:
     def test_state_reconstructed_at_a_point_in_time(self, log):
+        """Uses as_of_event_id to break the tie when both events land on the
+        same timestamp -- routine on Windows, where clock resolution is
+        coarser than the time between these two calls."""
         first = log.record(CREATE, "system", "NM-1", after={"members": ["A"]})
         log.record(CREATE, "system", "NM-2", after={"members": ["B"]})
+        state = log.version_at(first.timestamp, as_of_event_id=first.event_id)
+        assert "NM-1" in state
+        assert "NM-2" not in state
+
+    def test_without_as_of_event_id_ties_include_every_event_at_timestamp(self, log):
+        """The tie-blind default is unchanged: a bare timestamp cutoff
+        cannot distinguish same-timestamp events, so both are included."""
+        first = log.record(CREATE, "system", "NM-1", after={"members": ["A"]})
+        second = log.record(CREATE, "system", "NM-2", after={"members": ["B"]})
+        second.timestamp = first.timestamp  # force the collision deterministically
         state = log.version_at(first.timestamp)
+        assert "NM-1" in state
+        assert "NM-2" in state
+
+    def test_as_of_event_id_excludes_later_events_at_the_same_timestamp(self, log):
+        first = log.record(CREATE, "system", "NM-1", after={"members": ["A"]})
+        second = log.record(CREATE, "system", "NM-2", after={"members": ["B"]})
+        second.timestamp = first.timestamp  # force the collision deterministically
+        state = log.version_at(first.timestamp, as_of_event_id=first.event_id)
         assert "NM-1" in state
         assert "NM-2" not in state
