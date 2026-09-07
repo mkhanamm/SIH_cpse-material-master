@@ -486,11 +486,24 @@ def estimate_runtime_seconds(n_rows: int) -> float:
     why comparisons, and therefore runtime, grow faster than linearly with
     record count.
 
+    Runtime is modelled as a fixed setup overhead
+    (``config.RUNTIME_FIXED_OVERHEAD_SECONDS`` -- encoder import, classifier
+    load, blocking structures) plus a variable term that scales the
+    remainder of the measured baseline. The fixed term keeps the estimate
+    from reporting ``~0s`` for a tiny file, where setup is the whole cost,
+    while leaving the estimate at the baseline row count exactly equal to
+    ``config.RUNTIME_BASELINE_SECONDS``.
+
     Args:
         n_rows: Records in the (possibly sampled) dataset.
 
     Returns:
-        Estimated seconds for the full pipeline.
+        Estimated seconds for the full pipeline, never below
+        ``config.RUNTIME_FIXED_OVERHEAD_SECONDS``.
     """
     ratio = n_rows / config.RUNTIME_BASELINE_ROWS
-    return config.RUNTIME_BASELINE_SECONDS * (ratio**config.RUNTIME_SCALING_EXPONENT)
+    variable_baseline = (
+        config.RUNTIME_BASELINE_SECONDS - config.RUNTIME_FIXED_OVERHEAD_SECONDS
+    )
+    variable = variable_baseline * (ratio**config.RUNTIME_SCALING_EXPONENT)
+    return config.RUNTIME_FIXED_OVERHEAD_SECONDS + variable

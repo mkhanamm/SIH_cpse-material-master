@@ -407,3 +407,14 @@ class TestEstimateRuntimeSeconds:
         base = estimate_runtime_seconds(config.RUNTIME_BASELINE_ROWS)
         smaller = estimate_runtime_seconds(config.RUNTIME_BASELINE_ROWS // 2)
         assert smaller < base
+
+    def test_tiny_dataset_never_estimates_zero(self):
+        """A ten-row file still pays encoder/classifier setup -- not '~0s'."""
+        estimate = estimate_runtime_seconds(10)
+        assert estimate >= config.RUNTIME_FIXED_OVERHEAD_SECONDS
+        assert round(estimate) > 0
+
+    def test_fixed_overhead_dominates_for_the_smallest_files(self):
+        assert estimate_runtime_seconds(1) == pytest.approx(
+            config.RUNTIME_FIXED_OVERHEAD_SECONDS, abs=0.5
+        )

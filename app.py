@@ -277,12 +277,17 @@ def _active_dataset_args() -> tuple[ingestion.MaterialDataset, str]:
 def _format_seconds(seconds: float) -> str:
     """Render an estimated duration for the "Load Data" view.
 
+    Floored at the fixed setup overhead: even a ten-row file spends a few
+    seconds loading the encoder and the pre-trained classifier, so the view
+    must never display "~0s".
+
     Args:
         seconds: Estimated seconds.
 
     Returns:
         ``"~<n>s"`` under 90 seconds, otherwise ``"~<n> min"``.
     """
+    seconds = max(seconds, config.RUNTIME_FIXED_OVERHEAD_SECONDS)
     if seconds < 90:
         return f"~{seconds:.0f}s"
     return f"~{seconds / 60:.1f} min"
@@ -328,6 +333,69 @@ def _pipeline_not_run_yet(what_this_view_shows: str) -> None:
         st.rerun()
 
 
+def _register_nav(
+    *,
+    back: str | None = None,
+    back_label: str | None = None,
+    forward: str | None = None,
+    forward_label: str | None = None,
+    restart: bool = False,
+) -> None:
+    """Record the Back / Next targets for the view currently rendering.
+
+    ``main()`` renders them (via :func:`_render_view_nav`) after the view
+    function returns, so a view can register early and still return early.
+    Navigation is performed by setting ``pending_view`` and rerunning -- never
+    by writing the ``view_choice`` widget key directly -- which is the same
+    indirection the "Go to Run Matching" button uses to avoid Streamlit's
+    "cannot be modified after instantiation" error. The sidebar radio keeps
+    working exactly as before; these buttons are an addition to it.
+
+    Args:
+        back: View to move to on "Back", or None for no Back button.
+        back_label: Override for the Back button text.
+        forward: View to move to on "Next", or None for no Next button.
+        forward_label: Override for the Next button text.
+        restart: Render a "Start over" button (resetting the session) in
+            place of a Next button -- used on the last view.
+    """
+    st.session_state["_view_nav"] = {
+        "back": back,
+        "back_label": back_label or (f"Back: {back[3:]}" if back else None),
+        "forward": forward,
+        "forward_label": forward_label or (f"Next: {forward[3:]}" if forward else None),
+        "restart": restart,
+    }
+
+
+def _render_view_nav() -> None:
+    """Render the Back / Next buttons the active view registered, if any."""
+    nav = st.session_state.get("_view_nav")
+    if not nav:
+        return
+    st.divider()
+    left, right = st.columns(2)
+    if nav["back"] and left.button(
+        nav["back_label"], key="view_nav_back", width="stretch"
+    ):
+        st.session_state.pending_view = nav["back"]
+        st.rerun()
+    if nav["restart"]:
+        if right.button(
+            "Start over / load a different dataset",
+            key="view_nav_restart",
+            type="primary",
+            width="stretch",
+        ):
+            _reset_session()
+            st.rerun()
+    elif nav["forward"] and right.button(
+        nav["forward_label"], key="view_nav_forward", type="primary", width="stretch"
+    ):
+        st.session_state.pending_view = nav["forward"]
+        st.rerun()
+
+
 # ---------------------------------------------------------------------------
 # View 1 -- Load Data
 # ---------------------------------------------------------------------------
@@ -357,6 +425,7 @@ def view_load_data() -> None:
             "material categories. Continue to '2. The Problem' or "
             "'3. Run Matching'."
         )
+        _register_nav(forward=VIEWS[1], forward_label="Next: see the problem")
         return
 
     uploaded = st.file_uploader("Upload a material master", type=["xlsx", "csv"])
@@ -481,14 +550,21 @@ def view_load_data() -> None:
             "Continue to '2. The Problem' or '3. Run Matching'."
         )
 
+    if st.session_state.dataset is not None:
+        _register_nav(forward=VIEWS[1], forward_label="Next: see the problem")
+
 
 # ---------------------------------------------------------------------------
 # View 2 -- The Problem
 # ---------------------------------------------------------------------------
 def view_problem() -> None:
     """Show real cross-CPSE duplicates so the pain precedes the solution."""
+    _register_nav(back=VIEWS[0])
     if not _require_dataset():
         return
+    _register_nav(
+        back=VIEWS[0], forward=VIEWS[2], forward_label="Next: run matching"
+    )
     dataset, joined, _, _ = load_everything(*_active_dataset_args())
 
     st.header("The same material, coded differently by every enterprise")
@@ -591,6 +667,7 @@ def view_problem() -> None:
 def view_run_matching() -> None:
     """Execute the pipeline and show cost and quality side by side."""
     st.header("Run the matching pipeline")
+    _register_nav(back=VIEWS[1])
     if not _require_dataset():
         return
     st.write(
@@ -600,6 +677,9 @@ def view_run_matching() -> None:
 
     if st.button("Run pipeline", type="primary") or st.session_state.pipeline_run:
         st.session_state.pipeline_run = True
+        _register_nav(
+            back=VIEWS[1], forward=VIEWS[3], forward_label="Next: review a match"
+        )
         artifacts = run_pipeline(*_active_dataset_args())
         has_labels = artifacts["has_labels"]
         stats = artifacts["blocking"]
@@ -731,12 +811,16 @@ def view_run_matching() -> None:
 def view_review_match() -> None:
     """Show a full per-attribute explanation for one chosen cluster."""
     st.header("Why did the system propose this match?")
+    _register_nav(back=VIEWS[2])
     if not st.session_state.pipeline_run:
         _pipeline_not_run_yet(
             "a per-attribute explanation for one proposed cluster you "
             "choose, alongside its confidence tier and internal scores."
         )
         return
+    _register_nav(
+        back=VIEWS[2], forward=VIEWS[4], forward_label="Next: human review"
+    )
 
     _, joined, _, _ = load_everything(*_active_dataset_args())
     artifacts = run_pipeline(*_active_dataset_args())
@@ -789,6 +873,7 @@ def view_review_match() -> None:
 def view_human_review() -> None:
     """Approve, reject or edit queued clusters and show the feedback effect."""
     st.header("Human review queue")
+    _register_nav(back=VIEWS[3])
     if not st.session_state.pipeline_run:
         _pipeline_not_run_yet(
             "the medium-confidence review queue, where you can approve, "
@@ -796,6 +881,9 @@ def view_human_review() -> None:
             "feedback on accuracy."
         )
         return
+    _register_nav(
+        back=VIEWS[3], forward=VIEWS[5], forward_label="Next: generate national codes"
+    )
 
     dataset, joined, _, _ = load_everything(*_active_dataset_args())
     artifacts = run_pipeline(*_active_dataset_args())
@@ -913,6 +1001,7 @@ def view_human_review() -> None:
 def view_national_code() -> None:
     """Assign national codes to approved clusters and show the mapping."""
     st.header("Common National Material Code")
+    _register_nav(back=VIEWS[4])
     if not st.session_state.pipeline_run:
         _pipeline_not_run_yet(
             "assignment of national codes to auto-approved clusters, the "
@@ -920,6 +1009,7 @@ def view_national_code() -> None:
             "audit trail."
         )
         return
+    _register_nav(back=VIEWS[4], forward=VIEWS[6], forward_label="Next: dashboard")
 
     _, joined, _, _ = load_everything(*_active_dataset_args())
     artifacts = run_pipeline(*_active_dataset_args())
@@ -1024,12 +1114,14 @@ def view_national_code() -> None:
 def view_dashboard() -> None:
     """Programme-level totals, accuracy and a clearly-caveated savings estimate."""
     st.header("Programme dashboard")
+    _register_nav(back=VIEWS[5])
     if not st.session_state.pipeline_run:
         _pipeline_not_run_yet(
             "programme-level totals, accuracy against ground truth (when "
             "available) and an estimated procurement-savings figure."
         )
         return
+    _register_nav(back=VIEWS[5], restart=True)
 
     dataset, joined, _, _ = load_everything(*_active_dataset_args())
     artifacts = run_pipeline(*_active_dataset_args())
@@ -1150,6 +1242,10 @@ def main() -> None:
     if st.session_state.decisions:
         st.sidebar.metric("Decisions this session", len(st.session_state.decisions))
 
+    # Cleared each run; a view calls _register_nav() to opt back in, and the
+    # buttons render below the view via _render_view_nav().
+    st.session_state["_view_nav"] = None
+
     {
         VIEWS[0]: view_load_data,
         VIEWS[1]: view_problem,
@@ -1159,6 +1255,8 @@ def main() -> None:
         VIEWS[5]: view_national_code,
         VIEWS[6]: view_dashboard,
     }[view]()
+
+    _render_view_nav()
 
 
 if __name__ == "__main__":

@@ -205,6 +205,15 @@ RUNTIME_BASELINE_ROWS = 5_008
 RUNTIME_BASELINE_SECONDS = 80
 RUNTIME_SCALING_EXPONENT = 1.3
 
+# A roughly fixed cost paid before the first pair is scored, on any dataset
+# size: importing the semantic encoder, loading models/classifier.pkl,
+# building the blocking structures. The baseline measurement above already
+# includes it, so estimate_runtime_seconds models runtime as this fixed term
+# plus a variable term that scales only the remainder -- which keeps the
+# baseline exact while stopping the estimate collapsing to "~0s" on a
+# ten-row file, where setup, not comparison, is the whole cost.
+RUNTIME_FIXED_OVERHEAD_SECONDS = 4
+
 # Above this many rows, the "Load Data" view warns and offers to sample --
 # the super-linear growth above means a much bigger file is not just
 # proportionally slower to demo.
