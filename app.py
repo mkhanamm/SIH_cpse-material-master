@@ -379,8 +379,9 @@ def view_load_data() -> None:
         "Required: CPSE, CPSE Material Code, Material Category, Raw "
         "Description. Optional: Sector and the five attribute columns -- "
         "leave any of these as '-- none --' if your file doesn't have them. "
-        "Headers that already match a required or optional name are "
-        "pre-selected."
+        "Each dropdown is pre-filled with a best guess -- from the header "
+        "name where it matches, otherwise from the shape of the column's "
+        "values -- so check them rather than assume they're right."
     )
     st.caption(
         "CPSE is the company that owns the code, CPSE Material Code is "
@@ -389,13 +390,21 @@ def view_load_data() -> None:
         "system reads. Sector is optional but improves the national code "
         "format."
     )
-    suggested = data_loading.suggest_column_mapping(list(raw_df.columns))
+    suggested = data_loading.infer_column_mapping(raw_df)
     options = ["-- none --", *raw_df.columns]
+    hints = {column: data_loading.column_hint(raw_df[column]) for column in raw_df.columns}
+
+    def _option_label(option: str) -> str:
+        hint = hints.get(option)
+        return f"{option}  ({hint})" if hint else option
 
     def _mapping_selectbox(target: str) -> str | None:
         default = suggested.get(target)
         index = options.index(default) if default in options else 0
-        choice = st.selectbox(target, options, index=index, key=f"col_map_{target}")
+        choice = st.selectbox(
+            target, options, index=index, key=f"col_map_{target}",
+            format_func=_option_label,
+        )
         return None if choice == "-- none --" else choice
 
     st.write("**Required**")
@@ -403,6 +412,17 @@ def view_load_data() -> None:
     st.write("**Optional**")
     mapping.update(
         {target: _mapping_selectbox(target) for target in data_loading.OPTIONAL_COLUMNS}
+    )
+
+    st.caption("Example row with this mapping:")
+    preview_index = 0
+    if len(raw_df) > 1:
+        preview_index = st.number_input(
+            "Preview row", min_value=0, max_value=len(raw_df) - 1, value=0, step=1
+        )
+    st.code(
+        data_loading.preview_mapped_row(raw_df, mapping, int(preview_index)),
+        language=None,
     )
 
     missing_required = [t for t in data_loading.REQUIRED_COLUMNS if not mapping.get(t)]

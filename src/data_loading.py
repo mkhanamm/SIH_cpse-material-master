@@ -43,6 +43,8 @@ KEY FUNCTIONS
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
@@ -125,6 +127,245 @@ def suggest_column_mapping(columns: list[str]) -> dict[str, str | None]:
         target: normalized.get(_normalize_header(target))
         for target in ALL_MAPPABLE_COLUMNS
     }
+
+
+# ---------------------------------------------------------------------------
+# Data-shape guessing for the mapping UI
+# ---------------------------------------------------------------------------
+# Header names on a real CPSE export rarely match this schema, so a
+# header-only match (suggest_column_mapping) leaves a first-time user staring
+# at four empty dropdowns. These helpers inspect the *values* instead and
+# pre-select a best guess, which the user can still override.
+
+# "NTPC-VLV-2201", "M/12/0098" -- alphanumeric run(s) joined by - or /.
+_CODE_LIKE = re.compile(r"^[A-Za-z0-9]+(?:[-/][A-Za-z0-9]+)+$")
+# "NTPC", "Oil & Gas", "Gate Valve (lugged)" -- a label, not free text or a code.
+_NAME_LIKE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .,&'()-]*$")
+
+# Fields guess_column_mapping can infer (the four required ones).
+_GUESSABLE_FIELDS = (
+    "CPSE",
+    "CPSE Material Code",
+    "Material Category",
+    config.INPUT_TEXT_COLUMN,
+)
+
+
+def _clean_values(series: pd.Series) -> list[str]:
+    """Non-empty, non-null string values of a column, trimmed."""
+    cleaned: list[str] = []
+    for value in series.tolist():
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text or text.lower() in {"nan", "none", "<na>", "null"}:
+            continue
+        cleaned.append(text)
+    return cleaned
+
+
+def column_hint(series: pd.Series, n_examples: int = 3, max_chars: int = 24) -> str:
+    """A few distinct example values from a column, for the mapping dropdowns.
+
+    A first-time user recognises ``"NTPC, SAIL, BHEL..."`` far faster than
+    they match a bare header to the word "CPSE". Long values (descriptions)
+    are truncated so the option label stays on one line.
+
+    Args:
+        series: The source column.
+        n_examples: How many distinct values to show.
+        max_chars: Truncate any single example longer than this.
+
+    Returns:
+        A comma-separated preview like ``"NTPC, SAIL, BHEL..."``; the empty
+        string for a column with no usable values.
+    """
+    distinct: list[str] = []
+    for text in _clean_values(series):
+        if text not in distinct:
+            distinct.append(text)
+        if len(distinct) >= n_examples:
+            break
+    if not distinct:
+        return ""
+    shown = [
+        value if len(value) <= max_chars else value[: max_chars - 1].rstrip() + "…"
+        for value in distinct
+    ]
+    return ", ".join(shown) + ("..." if len(distinct) >= n_examples else "")
+
+
+@dataclass
+class _ColumnStats:
+    """Cheap value-shape statistics for one uploaded column."""
+
+    name: str
+    count: int
+    n_unique: int
+    unique_ratio: float
+    avg_len: float
+    frac_code_like: float
+    frac_name_like: float
+
+
+def _column_stats(name: str, series: pd.Series) -> _ColumnStats | None:
+    """Profile a column's values, or None if it has no usable values."""
+    values = _clean_values(series)
+    if not values:
+        return None
+    count = len(values)
+    n_unique = len(set(values))
+    avg_len = sum(len(v) for v in values) / count
+    frac_code_like = sum(1 for v in values if _CODE_LIKE.match(v)) / count
+    frac_name_like = sum(
+        1 for v in values if len(v) <= 28 and _NAME_LIKE.match(v)
+    ) / count
+    return _ColumnStats(
+        name=name,
+        count=count,
+        n_unique=n_unique,
+        unique_ratio=n_unique / count,
+        avg_len=avg_len,
+        frac_code_like=frac_code_like,
+        frac_name_like=frac_name_like,
+    )
+
+
+def guess_column_mapping(df: pd.DataFrame) -> dict[str, str | None]:
+    """Guess the four required mappings by inspecting column values.
+
+    Heuristics, applied in order so an unambiguous column is claimed before a
+    weaker signal can take it:
+
+    1. **Raw Description** -- the column with the longest average text
+       (>= 20 chars), which no code or label reaches.
+    2. **CPSE Material Code** -- nearly every value distinct
+       (unique ratio >= 0.9) and alphanumeric-with-separators more often
+       than not.
+    3. **CPSE** and **Material Category** -- both are short repeated labels;
+       the company column has *fewer* distinct values than the category
+       column, so the remaining label-like columns are ranked by distinct
+       count and the smallest is taken for CPSE, the next for Category.
+
+    Args:
+        df: The uploaded file, unmodified.
+
+    Returns:
+        ``{field: source_column_or_None}`` for each of the four required
+        fields. A field is left ``None`` when nothing matches confidently;
+        the user still confirms every choice in the UI.
+    """
+    mapping: dict[str, str | None] = {field: None for field in _GUESSABLE_FIELDS}
+    stats = [s for s in (_column_stats(c, df[c]) for c in df.columns) if s]
+    if not stats:
+        return mapping
+    taken: set[str] = set()
+
+    text_cols = sorted(
+        (s for s in stats if s.avg_len >= 20), key=lambda s: s.avg_len, reverse=True
+    )
+    if text_cols:
+        mapping[config.INPUT_TEXT_COLUMN] = text_cols[0].name
+        taken.add(text_cols[0].name)
+
+    code_cols = sorted(
+        (
+            s for s in stats
+            if s.name not in taken
+            and s.unique_ratio >= 0.9
+            and s.frac_code_like >= 0.5
+        ),
+        key=lambda s: (s.frac_code_like, s.unique_ratio),
+        reverse=True,
+    )
+    if code_cols:
+        mapping["CPSE Material Code"] = code_cols[0].name
+        taken.add(code_cols[0].name)
+
+    label_cols = sorted(
+        (
+            s for s in stats
+            if s.name not in taken
+            and s.n_unique >= 2
+            and s.unique_ratio <= 0.6
+            and s.avg_len <= 30
+            and s.frac_name_like >= 0.6
+        ),
+        key=lambda s: s.n_unique,
+    )
+    if label_cols:
+        mapping["CPSE"] = label_cols[0].name
+        taken.add(label_cols[0].name)
+    if len(label_cols) >= 2:
+        mapping["Material Category"] = label_cols[1].name
+        taken.add(label_cols[1].name)
+
+    return mapping
+
+
+def infer_column_mapping(df: pd.DataFrame) -> dict[str, str | None]:
+    """Pre-fill the mapping from header names first, then from data shape.
+
+    :func:`suggest_column_mapping` handles the easy case (a header already
+    called ``CPSE``); :func:`guess_column_mapping` fills the required fields
+    it left blank, never stealing a column an exact header match already
+    claimed.
+
+    Args:
+        df: The uploaded file, unmodified.
+
+    Returns:
+        ``{canonical_name: source_column_or_None}`` for every required and
+        optional column -- the same shape as :func:`suggest_column_mapping`.
+    """
+    mapping = suggest_column_mapping(list(df.columns))
+    used = {source for source in mapping.values() if source}
+    for field, guess in guess_column_mapping(df).items():
+        if mapping.get(field) is None and guess is not None and guess not in used:
+            mapping[field] = guess
+            used.add(guess)
+    return mapping
+
+
+def preview_mapped_row(
+    raw_df: pd.DataFrame, mapping: dict[str, str | None], index: int = 0
+) -> str:
+    """Render one example row as it would look under the current mapping.
+
+    Lets the user see immediately whether the mapping is right -- e.g.
+    ``"Company: NTPC | Code: NTPC-VLV-2201 | Category: Gate Valve |
+    Description: GATE V/V 100 NB CL-150 CS BODY"`` -- instead of finding out
+    after a full pipeline run.
+
+    Args:
+        raw_df: The uploaded file, unmodified.
+        mapping: ``{canonical_name: source_column_or_None}``.
+        index: Row to show; clamped into range.
+
+    Returns:
+        A single ``" | "``-joined line, or the empty string for an empty
+        frame.
+    """
+    if raw_df.empty:
+        return ""
+    index = max(0, min(int(index), len(raw_df) - 1))
+    row = raw_df.iloc[index]
+    parts: list[str] = []
+    for field, label in (
+        ("CPSE", "Company"),
+        ("CPSE Material Code", "Code"),
+        ("Material Category", "Category"),
+        (config.INPUT_TEXT_COLUMN, "Description"),
+    ):
+        source = mapping.get(field)
+        if source and source in raw_df.columns:
+            value = row[source]
+            text = "" if value is None else str(value).strip()
+            cell = text or "(blank)"
+        else:
+            cell = "(unmapped)"
+        parts.append(f"{label}: {cell}")
+    return " | ".join(parts)
 
 
 def duplicate_required_sources(

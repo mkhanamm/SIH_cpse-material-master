@@ -14,11 +14,46 @@ from src.data_loading import (
     UnsupportedFileType,
     apply_column_mapping,
     build_dataset_from_mapped,
+    column_hint,
     duplicate_required_sources,
     estimate_runtime_seconds,
+    guess_column_mapping,
+    infer_column_mapping,
+    preview_mapped_row,
     read_upload,
     suggest_column_mapping,
 )
+
+
+def _realistic_upload(n: int = 36) -> pd.DataFrame:
+    """An upload with non-matching headers but realistically-shaped values."""
+    companies = ["NTPC", "SAIL", "BHEL", "GAIL", "ONGC", "NMDC"]
+    categories = [
+        "Gate Valve", "Globe Valve", "Ball Bearing", "Seamless Pipe", "Gasket",
+        "Centrifugal Pump", "Transformer", "Conveyor Idler", "Circuit Breaker",
+    ]
+    descriptions = [
+        "GATE V/V 100 NB CL-150 CS BODY BOLTED BONNET",
+        "GLOBE VALVE 80MM CLASS 300 FORGED STEEL BODY",
+        "DEEP GROOVE BALL BEARING 6205 25MM BORE C3",
+        "CS SEAMLESS PIPE 40 NB SCH 40 ASTM A106 GR B",
+        "SPIRAL WOUND GASKET 150 NB CLASS 300 SS316 CG",
+        "CENTRIFUGAL PUMP 50 M3/HR 30 M HEAD 15 KW MOTOR",
+        "DISTRIBUTION TRANSFORMER 63 KVA 11/0.433 KV ONAN",
+        "TROUGHING IDLER ROLLER 152 MM DIA 3 ROLL CARRY SET",
+        "VACUUM CIRCUIT BREAKER 12 KV 1250 A 25 KA PANEL",
+    ]
+    return pd.DataFrame(
+        {
+            "Owner Org": [companies[i % len(companies)] for i in range(n)],
+            "Part No": [
+                f"{companies[i % len(companies)]}-{1000 + i}" for i in range(n)
+            ],
+            "Item Class": [categories[i % len(categories)] for i in range(n)],
+            "Long Text": [descriptions[i % len(descriptions)] for i in range(n)],
+            "UoM": ["NOS"] * n,
+        }
+    )
 
 
 def _uploaded_frame() -> pd.DataFrame:
@@ -143,6 +178,18 @@ class TestApplyColumnMapping:
         with pytest.raises(ValueError, match=r"Description.*Material Category|Material Category.*Raw Description"):
             apply_column_mapping(raw, mapping)
 
+    def test_output_is_reindexed_from_zero(self):
+        raw = _uploaded_frame()
+        raw.index = [10, 20]
+        mapping = {
+            "CPSE": "Enterprise",
+            "CPSE Material Code": "Material Code",
+            "Material Category": "Category",
+            "Raw Description": "Description",
+        }
+        out = apply_column_mapping(raw, mapping)
+        assert list(out.index) == [0, 1]
+
 
 class TestDuplicateRequiredSources:
     def test_one_to_one_mapping_has_no_collisions(self):
@@ -195,17 +242,124 @@ class TestDuplicateRequiredSources:
         }
         assert duplicate_required_sources(mapping) == {}
 
-    def test_output_is_reindexed_from_zero(self):
-        raw = _uploaded_frame()
-        raw.index = [10, 20]
-        mapping = {
-            "CPSE": "Enterprise",
-            "CPSE Material Code": "Material Code",
-            "Material Category": "Category",
-            "Raw Description": "Description",
+
+class TestColumnHint:
+    def test_shows_distinct_example_values(self):
+        hint = column_hint(pd.Series(["NTPC", "SAIL", "BHEL", "NTPC", "SAIL"]))
+        assert "NTPC" in hint and "SAIL" in hint and "BHEL" in hint
+
+    def test_trailing_ellipsis_when_more_values_exist(self):
+        assert column_hint(pd.Series(["a", "b", "c", "d"])).endswith("...")
+
+    def test_no_trailing_ellipsis_when_all_values_shown(self):
+        assert column_hint(pd.Series(["only", "two"])) == "only, two"
+
+    def test_long_values_are_truncated(self):
+        hint = column_hint(pd.Series(["X" * 80]))
+        assert len(hint) <= 25 and "…" in hint
+
+    def test_empty_or_all_null_column_gives_empty_string(self):
+        assert column_hint(pd.Series([None, float("nan"), "  "])) == ""
+
+
+class TestGuessColumnMapping:
+    def test_guesses_all_four_required_fields_from_data_shape(self):
+        guessed = guess_column_mapping(_realistic_upload())
+        assert guessed["Raw Description"] == "Long Text"
+        assert guessed["CPSE Material Code"] == "Part No"
+        assert guessed["CPSE"] == "Owner Org"
+        assert guessed["Material Category"] == "Item Class"
+
+    def test_longest_text_column_is_the_description(self):
+        df = pd.DataFrame(
+            {
+                "a": ["NTPC", "SAIL"] * 10,
+                "b": ["short label"] * 20,
+                "c": ["a much longer free text description of the item"] * 20,
+            }
+        )
+        assert guess_column_mapping(df)["Raw Description"] == "c"
+
+    def test_company_column_has_fewer_distinct_values_than_category(self):
+        guessed = guess_column_mapping(_realistic_upload())
+        # Owner Org (6 distinct) -> CPSE; Item Class (9 distinct) -> Category.
+        assert guessed["CPSE"] != guessed["Material Category"]
+
+    def test_unique_dashed_code_column_is_the_material_code(self):
+        df = pd.DataFrame(
+            {
+                "org": ["NTPC", "SAIL", "BHEL"] * 10,
+                "ref": [f"NTPC-VLV-{2000 + i}" for i in range(30)],
+                "kind": ["Gate Valve", "Globe Valve", "Ball Bearing"] * 10,
+                "text": ["a fairly long free-text material description here"] * 30,
+            }
+        )
+        assert guess_column_mapping(df)["CPSE Material Code"] == "ref"
+
+    def test_no_columns_yields_all_none(self):
+        guessed = guess_column_mapping(pd.DataFrame({"x": [None, None]}))
+        assert set(guessed.values()) == {None}
+
+    def test_never_maps_two_required_fields_to_one_column(self):
+        guessed = guess_column_mapping(_realistic_upload())
+        chosen = [c for c in guessed.values() if c is not None]
+        assert len(chosen) == len(set(chosen))
+
+
+class TestInferColumnMapping:
+    def test_exact_header_match_wins_over_data_guess(self):
+        df = _realistic_upload().rename(columns={"Owner Org": "CPSE"})
+        inferred = infer_column_mapping(df)
+        assert inferred["CPSE"] == "CPSE"
+
+    def test_fills_required_fields_left_blank_by_header_matching(self):
+        inferred = infer_column_mapping(_realistic_upload())
+        for field in REQUIRED_COLUMNS:
+            assert inferred[field] is not None
+
+    def test_covers_the_same_targets_as_suggest(self):
+        df = _realistic_upload()
+        assert set(infer_column_mapping(df)) == set(
+            suggest_column_mapping(list(df.columns))
+        )
+
+    def test_does_not_reuse_a_column_already_claimed_by_a_header_match(self):
+        # "Part No" renamed to the canonical code header; the guesser must not
+        # then also point CPSE or Category at it.
+        df = _realistic_upload().rename(columns={"Part No": "CPSE Material Code"})
+        inferred = infer_column_mapping(df)
+        claimed = [inferred[f] for f in REQUIRED_COLUMNS]
+        assert len(claimed) == len(set(claimed))
+
+
+class TestPreviewMappedRow:
+    def _mapping(self) -> dict[str, str]:
+        return {
+            "CPSE": "Owner Org",
+            "CPSE Material Code": "Part No",
+            "Material Category": "Item Class",
+            "Raw Description": "Long Text",
         }
-        out = apply_column_mapping(raw, mapping)
-        assert list(out.index) == [0, 1]
+
+    def test_renders_one_row_with_the_mapped_values(self):
+        line = preview_mapped_row(_realistic_upload(), self._mapping(), index=0)
+        assert line.startswith("Company: NTPC")
+        assert "Code: NTPC-1000" in line
+        assert "Category: Gate Valve" in line
+        assert "Description: GATE V/V 100 NB CL-150 CS BODY BOLTED BONNET" in line
+
+    def test_unmapped_field_is_labelled_not_omitted(self):
+        mapping = {**self._mapping(), "Material Category": None}
+        assert "Category: (unmapped)" in preview_mapped_row(
+            _realistic_upload(), mapping, 0
+        )
+
+    def test_index_is_clamped_into_range(self):
+        line = preview_mapped_row(_realistic_upload(n=5), self._mapping(), index=999)
+        assert line  # no IndexError, returns the last row
+
+    def test_empty_frame_gives_empty_string(self):
+        assert preview_mapped_row(pd.DataFrame(), self._mapping()) == ""
 
 
 class TestBuildDatasetFromMapped:
