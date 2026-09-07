@@ -14,6 +14,7 @@ from src.data_loading import (
     UnsupportedFileType,
     apply_column_mapping,
     build_dataset_from_mapped,
+    duplicate_required_sources,
     estimate_runtime_seconds,
     read_upload,
     suggest_column_mapping,
@@ -130,6 +131,69 @@ class TestApplyColumnMapping:
         }
         with pytest.raises(ValueError, match="CPSE Material Code"):
             apply_column_mapping(raw, mapping)
+
+    def test_same_column_mapped_to_two_required_fields_raises(self):
+        raw = _uploaded_frame()
+        mapping = {
+            "CPSE": "Enterprise",
+            "CPSE Material Code": "Material Code",
+            "Material Category": "Description",
+            "Raw Description": "Description",
+        }
+        with pytest.raises(ValueError, match=r"Description.*Material Category|Material Category.*Raw Description"):
+            apply_column_mapping(raw, mapping)
+
+
+class TestDuplicateRequiredSources:
+    def test_one_to_one_mapping_has_no_collisions(self):
+        mapping = {
+            "CPSE": "Enterprise",
+            "CPSE Material Code": "Material Code",
+            "Material Category": "Category",
+            "Raw Description": "Description",
+        }
+        assert duplicate_required_sources(mapping) == {}
+
+    def test_names_the_duplicated_column_and_the_colliding_fields(self):
+        mapping = {
+            "CPSE": "col_a",
+            "CPSE Material Code": "col_a",
+            "Material Category": "col_a",
+            "Raw Description": "col_a",
+        }
+        collisions = duplicate_required_sources(mapping)
+        assert set(collisions) == {"col_a"}
+        assert collisions["col_a"] == REQUIRED_COLUMNS
+
+    def test_partial_collision_reports_only_the_offending_pair(self):
+        mapping = {
+            "CPSE": "who",
+            "CPSE Material Code": "code",
+            "Material Category": "desc",
+            "Raw Description": "desc",
+        }
+        collisions = duplicate_required_sources(mapping)
+        assert collisions == {"desc": ["Material Category", "Raw Description"]}
+
+    def test_optional_columns_sharing_a_source_are_not_flagged(self):
+        mapping = {
+            "CPSE": "who",
+            "CPSE Material Code": "code",
+            "Material Category": "cat",
+            "Raw Description": "desc",
+            "Dimensions": "notes",
+            "Specification/Standard": "notes",
+        }
+        assert duplicate_required_sources(mapping) == {}
+
+    def test_unmapped_required_fields_do_not_count_as_a_collision(self):
+        mapping = {
+            "CPSE": None,
+            "CPSE Material Code": None,
+            "Material Category": "cat",
+            "Raw Description": "desc",
+        }
+        assert duplicate_required_sources(mapping) == {}
 
     def test_output_is_reindexed_from_zero(self):
         raw = _uploaded_frame()

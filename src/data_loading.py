@@ -30,11 +30,15 @@ OUTPUTS
     ingestion.MaterialDataset
 
 KEY FUNCTIONS
-    read_upload(file, filename)           -> pd.DataFrame
-    suggest_column_mapping(columns)       -> dict[str, str | None]
-    apply_column_mapping(raw_df, mapping) -> pd.DataFrame
-    build_dataset_from_mapped(df, label)  -> MaterialDataset
-    estimate_runtime_seconds(n_rows)      -> float
+    read_upload(file, filename)             -> pd.DataFrame
+    suggest_column_mapping(columns)         -> dict[str, str | None]
+    guess_column_mapping(df)                -> dict[str, str | None]
+    infer_column_mapping(df)                -> dict[str, str | None]
+    duplicate_required_sources(mapping)     -> dict[str, list[str]]
+    apply_column_mapping(raw_df, mapping)   -> pd.DataFrame
+    preview_mapped_row(raw_df, mapping)     -> str
+    build_dataset_from_mapped(df, label)    -> MaterialDataset
+    estimate_runtime_seconds(n_rows)        -> float
 """
 
 from __future__ import annotations
@@ -123,6 +127,38 @@ def suggest_column_mapping(columns: list[str]) -> dict[str, str | None]:
     }
 
 
+def duplicate_required_sources(
+    mapping: dict[str, str | None]
+) -> dict[str, list[str]]:
+    """Required fields that have been pointed at the same source column.
+
+    The mapping UI offers every source column for every field, so nothing
+    stops a user picking one column for two (or four) required fields. That
+    passes :func:`apply_column_mapping`'s existence checks -- the column is
+    real -- but produces a dataset where, say, ``Raw Description`` and
+    ``Material Category`` are identical, and the pipeline then quietly finds
+    no matches. This catches it before the run, not after.
+
+    Args:
+        mapping: ``{canonical_name: source_column_or_None}`` as confirmed by
+            the user.
+
+    Returns:
+        ``{source_column: [required fields mapped to it]}`` for every source
+        column claimed by two or more required fields, each field list in
+        :data:`REQUIRED_COLUMNS` order. Empty when the required mapping is
+        one-to-one.
+    """
+    by_source: dict[str, list[str]] = {}
+    for field in REQUIRED_COLUMNS:
+        source = mapping.get(field)
+        if source:
+            by_source.setdefault(source, []).append(field)
+    return {
+        source: fields for source, fields in by_source.items() if len(fields) > 1
+    }
+
+
 def apply_column_mapping(
     raw_df: pd.DataFrame, mapping: dict[str, str | None]
 ) -> pd.DataFrame:
@@ -141,12 +177,23 @@ def apply_column_mapping(
         columns (UOM, Legacy_Sector_Code) blank.
 
     Raises:
-        ValueError: If a required column has no mapping.
+        ValueError: If a required column has no mapping, or if the same
+            source column is mapped to more than one required field.
     """
     missing_required = [c for c in REQUIRED_COLUMNS if not mapping.get(c)]
     if missing_required:
         raise ValueError(
             f"Required column(s) not mapped: {', '.join(missing_required)}."
+        )
+
+    collisions = duplicate_required_sources(mapping)
+    if collisions:
+        detail = "; ".join(
+            f"{source!r} -> {', '.join(fields)}"
+            for source, fields in collisions.items()
+        )
+        raise ValueError(
+            f"One source column is mapped to several required fields: {detail}."
         )
 
     out = pd.DataFrame(index=raw_df.index)

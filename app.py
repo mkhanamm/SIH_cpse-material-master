@@ -410,6 +410,16 @@ def view_load_data() -> None:
         st.warning(f"Map the required column(s) first: {', '.join(missing_required)}.")
         return
 
+    collisions = data_loading.duplicate_required_sources(mapping)
+    if collisions:
+        for source, fields in collisions.items():
+            st.error(
+                f"Column **{source}** is mapped to more than one required "
+                f"field ({', '.join(fields)}). Each required field needs its "
+                "own column -- fix the mapping above before loading."
+            )
+        return
+
     n_rows = len(raw_df)
     estimate = data_loading.estimate_runtime_seconds(n_rows)
     st.subheader("Before you run it")
