@@ -5,6 +5,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+from src.attribute_extraction import extract_frame
 from src.blocking import (
     GENERIC_CATEGORY_TOKENS,
     _size_bucket,
@@ -128,6 +129,72 @@ class TestCandidatePairs:
     def test_unrelated_records_are_not_paired(self, frame):
         result = candidate_pairs(frame, ["category_size", "category_token"])
         assert (0, 4) not in result.pairs
+
+
+class TestBareMillimetreSizeReachesBlocking:
+    """End-to-end: on an upload with only the four required columns mapped, a
+    gate valve written '100MM' must block with gate valves written '100 NB'.
+    Before the bare-mm fallback, the '100MM' rows had nominal_size_mm=None,
+    fell into the sz::na bucket and were never compared to the sized records.
+    """
+
+    @staticmethod
+    def _ten_row_upload() -> pd.DataFrame:
+        # Only Raw Description carries size -- no Dimensions column, exactly as
+        # a real CPSE master looks once the required columns are mapped.
+        rows = [
+            ("Gate Valve", "GATE VALVE 100MM CLASS 150 CARBON STEEL BODY"),
+            ("Gate Valve", "GATE VALVE 100 NB CLASS 150 CS"),
+            ("Gate Valve", "CAST IRON GATE VALVE 100MM PN16"),
+            ("Centrifugal Pump", "CENTRIFUGAL PUMP 50 M3/HR 30 M HEAD"),
+            ("Distribution Transformer", "DISTRIBUTION TRANSFORMER 63 KVA 11/0.433 KV"),
+            ("Ball Bearing", "DEEP GROOVE BALL BEARING 25 MM BORE"),
+            ("Seamless Pipe", "CS SMLS PIPE 40 NB SCH 40"),
+            ("Conveyor Belt", "CONVEYOR BELT 1200 MM WIDTH 4 PLY"),
+            ("Structural Plate", "MS PLATE 2500 X 1250 MM 10 MM THICKNESS"),
+            ("Gasket", "SPIRAL WOUND GASKET 80 NB CLASS 300"),
+        ]
+        return pd.DataFrame(
+            {
+                "CPSE": [f"CPSE{i}" for i in range(len(rows))],
+                "CPSE Material Code": [f"M{i:03d}" for i in range(len(rows))],
+                "Material Category": [c for c, _ in rows],
+                "Raw Description": [d for _, d in rows],
+            }
+        )
+
+    def test_three_gate_valves_land_in_one_bucket(self):
+        df = self._ten_row_upload()
+        joined = df.join(extract_frame(df))
+
+        # The bare-mm rows now carry the same size as the NB row.
+        assert list(joined.loc[[0, 1, 2], "nominal_size_mm"]) == [100.0, 100.0, 100.0]
+
+        result = candidate_pairs(joined)
+        gate_valve_pairs = {(0, 1), (0, 2), (1, 2)}
+        assert gate_valve_pairs <= set(result.pairs)
+
+        # And they are genuinely co-bucketed, not merely pairwise via a size band.
+        bucket_members = [
+            set(members) for members in result.blocks.values() if len(members) >= 3
+        ]
+        assert any({0, 1, 2} <= members for members in bucket_members)
+
+    def test_bare_mm_rows_are_not_stranded_in_the_na_bucket(self):
+        df = self._ten_row_upload()
+        joined = df.join(extract_frame(df))
+        result = candidate_pairs(joined)
+        # Every gate valve row has at least one candidate partner.
+        for idx in (0, 1, 2):
+            assert any(idx in pair for pair in result.pairs)
+
+    def test_unrelated_rows_still_do_not_pair_with_the_gate_valves(self):
+        df = self._ten_row_upload()
+        joined = df.join(extract_frame(df))
+        result = candidate_pairs(joined)
+        # The plate's trailing "1250 mm" must not have become a 1250 mm bore
+        # that collides with anything; the transformer shares nothing.
+        assert not any(4 in pair for pair in result.pairs)
 
 
 class TestBlockingEvaluation:

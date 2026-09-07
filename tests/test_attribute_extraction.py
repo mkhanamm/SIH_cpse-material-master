@@ -83,6 +83,52 @@ class TestExtraction:
         assert extract("HELICAL GEARBOX 5HP RATIO 15:1 FOOT MTD").ratio == "15:1"
 
 
+class TestBareMillimetreFallback:
+    """A bare '100mm' with no NB/bore/inch cue -- the only size source on a
+    real CPSE upload where just the four required columns are mapped."""
+
+    def test_gate_valve_bare_mm_is_extracted(self):
+        attrs = extract("GATE VALVE 100MM CLASS 150 CARBON STEEL BODY")
+        assert attrs.nominal_size_mm == 100.0
+
+    def test_bare_mm_provenance_is_marked_weak_not_confident(self):
+        attrs = extract("GATE VALVE 100MM CLASS 150 CARBON STEEL BODY")
+        assert attrs.provenance["nominal_size_mm"] == "regex_weak"
+
+    def test_confident_nb_match_keeps_plain_regex_provenance(self):
+        attrs = extract("GATE VALVE 100 NB CLASS 150")
+        assert attrs.nominal_size_mm == 100.0
+        assert attrs.provenance["nominal_size_mm"] == "regex"
+
+    def test_bare_and_nb_records_converge_on_the_same_size(self):
+        bare = extract("CAST IRON GATE VALVE 100MM PN16")
+        nb = extract("GATE VALVE 100 NB CLASS 150 CS")
+        assert bare.nominal_size_mm == nb.nominal_size_mm == 100.0
+
+    def test_thickness_is_not_read_as_a_nominal_size(self):
+        attrs = extract("MS PLATE 3000 LONG 6 MM THICKNESS")
+        assert attrs.thickness_mm == 6.0
+        assert attrs.nominal_size_mm is None
+
+    def test_width_is_not_read_as_a_nominal_size(self):
+        attrs = extract("CONVEYOR BELT 800 MM WIDTH 3 PLY")
+        assert attrs.width_mm == 800.0
+        assert attrs.nominal_size_mm is None
+
+    def test_dimension_pair_tail_is_not_read_as_a_nominal_size(self):
+        """'3000 x 1500 mm' is a plate size -- the 1500 must not become a bore."""
+        attrs = extract("CARBON STEEL PLATE 3000 X 1500 MM")
+        assert attrs.nominal_size_mm is None
+
+    def test_bore_keyword_still_takes_the_confident_path(self):
+        attrs = extract("DEEP GROOVE BALL BEARING 25 MM BORE")
+        assert attrs.nominal_size_mm == 25.0
+        assert attrs.provenance["nominal_size_mm"] == "regex"
+
+    def test_no_measurement_still_degrades_to_none(self):
+        assert extract("APRON FEEDER PAN").nominal_size_mm is None
+
+
 class TestGracefulDegradation:
     def test_absent_attributes_are_none_not_defaults(self):
         """A fabricated zero would read downstream as a real, matching value."""

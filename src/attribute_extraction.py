@@ -136,6 +136,8 @@ class AttributeSet:
 
     Attributes:
         provenance: Per-attribute origin -- ``'regex'`` (from description text),
+            ``'regex_weak'`` (a low-confidence last-resort text reading, e.g. a
+            bare ``100mm`` size with no "nominal bore"/"bore" cue),
             ``'column'`` (from the semi-structured column), ``'both'`` (agreeing
             sources), ``'conflict'`` (sources disagree; column wins and the
             disagreement is recorded), or ``'unknown'``.
@@ -246,6 +248,60 @@ def inch_to_nb_mm(inches: float) -> float | None:
     return INCH_TO_NB_MM.get(round(inches, 2))
 
 
+# A bare "<number> mm" measurement -- the last-resort size cue.
+_BARE_MM = re.compile(rf"{_NUM}\s*mm\b")
+# Words that mark a "<n> mm" hit as belonging to a different, already-handled
+# measurement (thickness, width, bore) rather than a nominal size.
+_MM_OWNED_BY_OTHER = re.compile(
+    r"(?:thick|thickness|wide|width|bore)\s*$"  # "... 6 mm" preceded by the word
+)
+_MM_FOLLOWED_BY_OTHER = re.compile(r"^\s*(?:bore|thick|thickness|wide|width)")
+# "<n> mm" that is the trailing term of a "3000 x 1500 mm" dimension pair --
+# a plate/sheet size, not a bore.
+_MM_DIMENSION_PAIR_TAIL = re.compile(r"\d\s*[x×]\s*$")
+
+
+def _bare_mm_size(text: str, already: dict[str, object]) -> float | None:
+    """Last-resort nominal size: a bare "<number> mm" with no NB/bore/inch cue.
+
+    Real CPSE descriptions routinely give a valve or fitting size as a plain
+    ``100mm`` with no "nominal bore" or "bore" keyword. The demo dataset hid
+    this because its ``Dimensions`` column supplied the size; an upload with
+    only the four required columns mapped has the description as the only
+    source. This reading is deliberately low-confidence -- callers mark its
+    provenance ``'regex_weak'``, distinct from a confident NB match.
+
+    Guards -- the fallback does **not** fire when the ``<n> mm`` hit is:
+        * labelled as a thickness or width (those have their own pattern and
+          their own attribute), or a bore (handled by ``bore_mm``);
+        * the trailing term of a ``3000 x 1500 mm`` dimension pair;
+        * a value already extracted as ``thickness_mm`` or ``width_mm``.
+
+    Args:
+        text: Normalized description.
+        already: Values extracted so far by the other text rules.
+
+    Returns:
+        The size in mm, or None if no unambiguous bare measurement is present.
+    """
+    handled = {
+        float(v)
+        for k, v in already.items()
+        if k in ("thickness_mm", "width_mm") and isinstance(v, (int, float))
+    }
+    for match in _BARE_MM.finditer(text):
+        value = float(match.group(1))
+        if (
+            _MM_OWNED_BY_OTHER.search(text[: match.start()])
+            or _MM_FOLLOWED_BY_OTHER.search(text[match.end() :])
+            or _MM_DIMENSION_PAIR_TAIL.search(text[: match.start()])
+            or value in handled
+        ):
+            continue
+        return value
+    return None
+
+
 def _extract_from_text(text: str) -> tuple[dict[str, object], dict[str, str]]:
     """Apply every regex rule to normalized text.
 
@@ -291,7 +347,19 @@ def _extract_from_text(text: str) -> tuple[dict[str, object], dict[str, str]]:
             values["material_of_construction"] = canonical
             break
 
-    return values, {k: "regex" for k in values}
+    provenance = {k: "regex" for k in values}
+
+    # Last resort: if no NB / bore / inch pattern gave a size, accept a bare
+    # "<number> mm" measurement (see _bare_mm_size). Recorded distinctly as
+    # 'regex_weak' so the explanation layer never presents it as a confident
+    # nominal-bore reading.
+    if "nominal_size_mm" not in values:
+        bare = _bare_mm_size(text, values)
+        if bare is not None:
+            values["nominal_size_mm"] = bare
+            provenance["nominal_size_mm"] = "regex_weak"
+
+    return values, provenance
 
 
 def _extract_from_columns(row: pd.Series) -> tuple[dict[str, object], dict[str, str]]:
