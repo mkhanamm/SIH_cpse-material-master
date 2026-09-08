@@ -448,9 +448,10 @@ def view_load_data() -> None:
         "Required: CPSE, CPSE Material Code, Material Category, Raw "
         "Description. Optional: Sector and the five attribute columns -- "
         "leave any of these as '-- none --' if your file doesn't have them. "
-        "Each dropdown is pre-filled with a best guess -- from the header "
-        "name where it matches, otherwise from the shape of the column's "
-        "values -- so check them rather than assume they're right."
+        "Each dropdown is pre-filled with a best guess -- from a fuzzy match "
+        "on the header name, falling back to the shape of the column's values "
+        "-- and left blank when nothing matches confidently. Check them "
+        "rather than assume they're right."
     )
     st.caption(
         "CPSE is the company that owns the code, CPSE Material Code is "

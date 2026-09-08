@@ -19,10 +19,57 @@ from src.data_loading import (
     estimate_runtime_seconds,
     guess_column_mapping,
     infer_column_mapping,
+    match_column_headers,
     preview_mapped_row,
     read_upload,
     suggest_column_mapping,
 )
+
+
+def _real_world_upload() -> pd.DataFrame:
+    """A 10-row export with the header set that broke the shape-only guesser.
+
+    Headers: Enterprise, Part Number, Item Category, Item Description,
+    Material Grade, Size, Standard, Rating, Unit -- where the company,
+    grade and unit-of-measure columns are all short repeated labels that a
+    distinct-count heuristic cannot tell apart.
+    """
+    companies = ["NTPC", "SAIL", "BHEL", "NTPC", "GAIL", "SAIL", "IOCL", "BHEL",
+                 "ONGC", "NMDC"]
+    return pd.DataFrame(
+        {
+            "Enterprise": companies,
+            "Part Number": [f"{c}-{45001 + i}" for i, c in enumerate(companies)],
+            "Item Category": [
+                "Gate Valve", "Ball Bearing", "Seamless Pipe", "Gate Valve",
+                "Gasket", "Ball Bearing", "Centrifugal Pump", "Transformer",
+                "Conveyor Idler", "Circuit Breaker",
+            ],
+            "Item Description": [
+                "GATE VALVE 100 NB CLASS 150 CARBON STEEL BODY BOLTED BONNET",
+                "DEEP GROOVE BALL BEARING 6205 25 MM BORE C3 CLEARANCE",
+                "SEAMLESS CARBON STEEL PIPE 40 NB SCH 40 ASTM A106 GR B",
+                "GATE VALVE 100 NB CLASS 150 CAST STEEL BODY RISING STEM",
+                "SPIRAL WOUND GASKET 150 NB CLASS 300 SS316 GRAPHITE FILLER",
+                "DEEP GROOVE BALL BEARING 6205 25 MM BORE ZZ SHIELDED",
+                "CENTRIFUGAL PUMP 50 M3/HR 30 M HEAD 15 KW 2900 RPM",
+                "DISTRIBUTION TRANSFORMER 63 KVA 11/0.433 KV ONAN COPPER",
+                "TROUGHING IDLER ROLLER 152 MM DIA 3 ROLL CARRYING SET",
+                "VACUUM CIRCUIT BREAKER 12 KV 1250 A 25 KA WITHDRAWABLE",
+            ],
+            "Material Grade": ["A216 WCB", "SS316", "A106 GR B", "A216 WCB",
+                               "SS316", "SS316", "CI", "CRGO", "EN8", "EPDM"],
+            "Size": ["100 NB", "25 MM", "40 NB", "100 NB", "150 NB", "25 MM",
+                     "50 NB", "1000 KVA", "900 MM", "12 KV"],
+            "Standard": ["API 600", "SKF 6205", "ASTM A106", "API 600",
+                         "ASME B16.20", "SKF 6205", "IS 1520", "IS 2026",
+                         "IS 8598", "IS 13118"],
+            "Rating": ["PN 16", "", "SCH 40", "PN 16", "300#", "", "32 M",
+                       "63 KVA", "", ""],
+            "Unit": ["NOS", "NOS", "MTR", "NOS", "NOS", "NOS", "NOS", "NOS",
+                     "SET", "NOS"],
+        }
+    )
 
 
 def _realistic_upload(n: int = 36) -> pd.DataFrame:
@@ -330,6 +377,121 @@ class TestInferColumnMapping:
         inferred = infer_column_mapping(df)
         claimed = [inferred[f] for f in REQUIRED_COLUMNS]
         assert len(claimed) == len(set(claimed))
+
+    def test_falls_back_to_data_shape_when_headers_are_opaque(self):
+        df = _realistic_upload().rename(
+            columns={
+                "Owner Org": "F1", "Part No": "F2", "Item Class": "F3",
+                "Long Text": "F4", "UoM": "F5",
+            }
+        )
+        inferred = infer_column_mapping(df)
+        assert inferred["Raw Description"] == "F4"      # longest average text
+        assert inferred["CPSE Material Code"] == "F2"   # unique + dash-segmented
+        assert inferred["CPSE"] == "F1"                 # fewer distinct labels
+        assert inferred["Material Category"] == "F3"
+
+    def test_low_confidence_required_field_is_left_unmapped(self):
+        """One ambiguous label column -> CPSE stays None, not a bad guess."""
+        df = pd.DataFrame(
+            {
+                "desc_txt": [
+                    f"a long free-text material description number {i}" for i in range(8)
+                ],
+                "code": [f"MC-{i:04d}" for i in range(8)],
+                "grp": ["Valve", "Pump", "Valve", "Pipe", "Pump", "Valve",
+                        "Pipe", "Gasket"],
+                "uom": ["NOS"] * 8,
+            }
+        )
+        inferred = infer_column_mapping(df)
+        assert inferred["CPSE"] is None
+
+    def test_optional_fields_are_not_filled_from_leftover_columns(self):
+        df = _real_world_upload()
+        inferred = infer_column_mapping(df)
+        assert inferred["Sector"] is None
+        assert inferred["Operating Parameter"] is None
+
+
+class TestInferColumnMappingRealWorldHeaders:
+    """The exact header set from the bug report:
+    Enterprise, Part Number, Item Category, Item Description, Material Grade,
+    Size, Standard, Rating, Unit.
+    """
+
+    def test_produces_the_correct_required_mapping(self):
+        inferred = infer_column_mapping(_real_world_upload())
+        assert inferred["CPSE"] == "Enterprise"
+        assert inferred["CPSE Material Code"] == "Part Number"
+        assert inferred["Material Category"] == "Item Category"
+        assert inferred["Raw Description"] == "Item Description"
+
+    def test_unit_of_measure_column_is_never_company_or_category(self):
+        inferred = infer_column_mapping(_real_world_upload())
+        assert inferred["CPSE"] != "Unit"
+        assert inferred["Material Category"] != "Unit"
+
+    def test_material_grade_column_does_not_become_material_category(self):
+        inferred = infer_column_mapping(_real_world_upload())
+        assert inferred["Material Category"] != "Material Grade"
+
+    def test_sector_is_not_guessed_from_the_company_column(self):
+        assert infer_column_mapping(_real_world_upload())["Sector"] is None
+
+    def test_optional_attribute_columns_map_by_fuzzy_header(self):
+        inferred = infer_column_mapping(_real_world_upload())
+        assert inferred["Material/Grade"] == "Material Grade"
+        assert inferred["Dimensions"] == "Size"
+        assert inferred["Specification/Standard"] == "Standard"
+        assert inferred["Capacity/Rating"] == "Rating"
+
+    def test_full_mapping_is_exactly_as_expected(self):
+        assert infer_column_mapping(_real_world_upload()) == {
+            "CPSE": "Enterprise",
+            "CPSE Material Code": "Part Number",
+            "Material Category": "Item Category",
+            "Raw Description": "Item Description",
+            "Sector": None,
+            "Material/Grade": "Material Grade",
+            "Dimensions": "Size",
+            "Specification/Standard": "Standard",
+            "Capacity/Rating": "Rating",
+            "Operating Parameter": None,
+        }
+
+
+class TestMatchColumnHeaders:
+    def test_fuzzy_synonyms_map_to_the_right_field(self):
+        df = pd.DataFrame(
+            {
+                "Company Name": ["NTPC", "SAIL"],
+                "Organisation": ["A", "B"],
+                "Item Group": ["Valve", "Pump"],
+                "Long Description": ["x y z", "p q r"],
+            }
+        )
+        matched = match_column_headers(df)
+        assert matched["CPSE"] in {"Company Name", "Organisation"}
+        assert matched["Material Category"] == "Item Group"
+        assert matched["Raw Description"] == "Long Description"
+
+    def test_below_threshold_header_is_left_none(self):
+        df = pd.DataFrame({"Widget": ["a", "b"], "Blob": ["c", "d"]})
+        assert set(match_column_headers(df).values()) == {None}
+
+    def test_uom_column_is_not_matched_to_cpse_even_with_a_matching_header(self):
+        # Header "Unit" fuzzily matches CPSE's "unit name" synonym, but the
+        # values are unit-of-measure tokens.
+        df = pd.DataFrame(
+            {"Unit": ["NOS", "MTR", "NOS", "SET"], "Plant": ["NTPC", "SAIL", "BHEL", "GAIL"]}
+        )
+        matched = match_column_headers(df)
+        assert matched["CPSE"] == "Plant"
+
+    def test_covers_every_mappable_target(self):
+        matched = match_column_headers(_real_world_upload())
+        assert set(matched) == set(REQUIRED_COLUMNS) | set(OPTIONAL_COLUMNS)
 
 
 class TestPreviewMappedRow:

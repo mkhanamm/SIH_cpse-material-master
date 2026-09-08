@@ -32,6 +32,7 @@ OUTPUTS
 KEY FUNCTIONS
     read_upload(file, filename)             -> pd.DataFrame
     suggest_column_mapping(columns)         -> dict[str, str | None]
+    match_column_headers(df)                -> dict[str, str | None]
     guess_column_mapping(df)                -> dict[str, str | None]
     infer_column_mapping(df)                -> dict[str, str | None]
     duplicate_required_sources(mapping)     -> dict[str, list[str]]
@@ -48,6 +49,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
+from rapidfuzz.fuzz import token_set_ratio
 
 from . import config, ingestion
 
@@ -130,12 +132,27 @@ def suggest_column_mapping(columns: list[str]) -> dict[str, str | None]:
 
 
 # ---------------------------------------------------------------------------
-# Data-shape guessing for the mapping UI
+# Mapping inference for the "Load Data" view
 # ---------------------------------------------------------------------------
-# Header names on a real CPSE export rarely match this schema, so a
-# header-only match (suggest_column_mapping) leaves a first-time user staring
-# at four empty dropdowns. These helpers inspect the *values* instead and
-# pre-select a best guess, which the user can still override.
+# Header names on a real CPSE export rarely match this schema exactly, so
+# exact-match pre-fill (suggest_column_mapping) leaves a first-time user
+# staring at empty dropdowns. infer_column_mapping fixes that in two tiers:
+#
+#   1. FUZZY HEADER MATCH (primary). Each mappable field carries a list of
+#      synonym phrases; a source header is matched against them with
+#      rapidfuzz. This is weighted far above the value-shape signal below --
+#      a header called "Enterprise" is a company column even though its
+#      values look exactly like a unit-of-measure or grade column.
+#   2. VALUE SHAPE (fallback, required fields only). When no header matches,
+#      guess_column_mapping inspects the values: longest average text is the
+#      description, a near-unique dash-segmented column is the code, and the
+#      most-repeated short label columns are the company / category.
+#
+# Negative signal: a column whose values are dominated by unit-of-measure
+# tokens is never a company or a category, whatever its header says.
+# Optional fields are only ever filled by a confident header match -- never
+# from a leftover column -- and a required field with no confident match is
+# left unselected rather than guessed badly.
 
 # "NTPC-VLV-2201", "M/12/0098" -- alphanumeric run(s) joined by - or /.
 _CODE_LIKE = re.compile(r"^[A-Za-z0-9]+(?:[-/][A-Za-z0-9]+)+$")
@@ -149,6 +166,148 @@ _GUESSABLE_FIELDS = (
     "Material Category",
     config.INPUT_TEXT_COLUMN,
 )
+
+# Header synonyms per mappable field. Deliberately broad: real exports use
+# "Part No", "Item Code", "Material Number" for the same thing. The canonical
+# field name is always tried too, so this only needs the *alternatives*.
+_HEADER_SYNONYMS: dict[str, list[str]] = {
+    "CPSE": [
+        "enterprise", "enterprise name", "company", "company name", "organisation",
+        "organization", "org", "org name", "plant", "plant name", "unit",
+        "unit name", "owner", "owning unit", "psu", "firm", "entity",
+    ],
+    "CPSE Material Code": [
+        "material code", "material number", "matl code", "mat code",
+        "part number", "part no", "part code", "item code", "item number",
+        "item no", "stock code", "sku", "code", "material id", "erp code",
+        "catalogue number", "catalog number", "cat no",
+    ],
+    "Material Category": [
+        "material category", "item category", "category", "material type",
+        "item type", "material group", "commodity group", "commodity",
+        "product group", "product category", "group", "class", "item class",
+        "material class", "family", "sub category",
+    ],
+    config.INPUT_TEXT_COLUMN: [
+        "raw description", "description", "item description",
+        "material description", "long description", "long text", "short text",
+        "item text", "material text", "desc", "descr", "item name",
+        "material name", "nomenclature", "particulars", "details",
+    ],
+    "Sector": [
+        "sector", "industry", "industry sector", "business sector", "vertical",
+        "segment", "domain",
+    ],
+    "Material/Grade": [
+        "material grade", "grade", "matl grade", "material of construction",
+        "moc", "metallurgy", "material spec", "grade of material",
+    ],
+    "Dimensions": [
+        "dimensions", "dimension", "size", "nominal size", "measurements",
+        "dims", "size mm",
+    ],
+    "Specification/Standard": [
+        "specification standard", "specification", "spec", "standard", "std",
+        "norm", "spec standard", "applicable standard", "governing standard",
+    ],
+    "Capacity/Rating": [
+        "capacity rating", "capacity", "rating", "duty", "kva rating",
+        "capacity or rating",
+    ],
+    "Operating Parameter": [
+        "operating parameter", "operating parameters", "operating condition",
+        "operating conditions", "service condition", "process parameter",
+        "working condition",
+    ],
+}
+
+# A header must clear this fuzzy score to pre-select a field. High on
+# purpose: a wrong pre-selection is worse than an empty dropdown.
+_HEADER_MATCH_THRESHOLD = 0.80
+
+# Values that mark a column as a unit-of-measure column (never a company or a
+# category). Whole-value match, case-insensitive.
+_UOM_TOKENS = frozenset({
+    "nos", "no", "each", "ea", "set", "sets", "pair", "prs", "pairs",
+    "mtr", "mtrs", "m", "rm", "km", "kg", "kgs", "gm", "gms", "mg", "mt",
+    "ton", "tons", "tonne", "tonnes", "ltr", "ltrs", "lit", "l", "ml",
+    "pcs", "pc", "pce", "unit", "units", "roll", "rolls", "coil", "coils",
+    "box", "bag", "drum", "can", "sheet", "length", "dozen", "gross", "lot",
+})
+
+
+def _fuzzy_norm(text: object) -> str:
+    """Lowercase and reduce any run of non-alphanumerics to one space."""
+    return re.sub(r"[^a-z0-9]+", " ", str(text).lower()).strip()
+
+
+def _header_similarity(header: str, synonym: str) -> float:
+    """Fuzzy similarity between a source header and one synonym, in [0, 1]."""
+    h, s = _fuzzy_norm(header), _fuzzy_norm(synonym)
+    if not h or not s:
+        return 0.0
+    if h == s:
+        return 1.0
+    h_tokens, s_tokens = set(h.split()), set(s.split())
+    if s_tokens <= h_tokens:
+        return 0.93          # header contains the whole synonym phrase
+    if h_tokens <= s_tokens:
+        return 0.60          # header is only a fragment of the synonym
+    return token_set_ratio(h, s) / 100.0
+
+
+def _best_header_score(header: str, field: str) -> float:
+    """Best fuzzy score of ``header`` against ``field``'s name and synonyms."""
+    candidates = (field, *_HEADER_SYNONYMS.get(field, ()))
+    return max(_header_similarity(header, candidate) for candidate in candidates)
+
+
+def _uom_columns(df: pd.DataFrame) -> set[str]:
+    """Names of columns whose values are predominantly unit-of-measure tokens."""
+    uom: set[str] = set()
+    for column in df.columns:
+        values = _clean_values(df[column])
+        if not values:
+            continue
+        hits = sum(1 for v in values if v.lower() in _UOM_TOKENS)
+        if hits / len(values) >= 0.7:
+            uom.add(column)
+    return uom
+
+
+def match_column_headers(df: pd.DataFrame) -> dict[str, str | None]:
+    """Fuzzy-match every mappable field to its best-scoring source header.
+
+    Weighted heavily over value shape: the header text is the strongest
+    evidence a human has, so the system trusts it too. A field is left
+    ``None`` unless some header clears :data:`_HEADER_MATCH_THRESHOLD`. A
+    unit-of-measure column can never be matched to CPSE or Material Category.
+
+    Args:
+        df: The uploaded file, unmodified.
+
+    Returns:
+        ``{canonical_name: source_column_or_None}`` for every mappable column.
+    """
+    columns = list(df.columns)
+    uom = _uom_columns(df)
+    scored: list[tuple[float, str, str]] = []
+    for field in ALL_MAPPABLE_COLUMNS:
+        for header in columns:
+            if field in ("CPSE", "Material Category") and header in uom:
+                continue
+            score = _best_header_score(header, field)
+            if score >= _HEADER_MATCH_THRESHOLD:
+                scored.append((score, field, header))
+
+    scored.sort(key=lambda triple: triple[0], reverse=True)
+    mapping: dict[str, str | None] = {field: None for field in ALL_MAPPABLE_COLUMNS}
+    used: set[str] = set()
+    for _, field, header in scored:
+        if mapping[field] is None and header not in used:
+            mapping[field] = header
+            used.add(header)
+    return mapping
 
 
 def _clean_values(series: pd.Series) -> list[str]:
@@ -282,10 +441,12 @@ def guess_column_mapping(df: pd.DataFrame) -> dict[str, str | None]:
         mapping["CPSE Material Code"] = code_cols[0].name
         taken.add(code_cols[0].name)
 
+    uom = _uom_columns(df)
     label_cols = sorted(
         (
             s for s in stats
             if s.name not in taken
+            and s.name not in uom
             and s.n_unique >= 2
             and s.unique_ratio <= 0.6
             and s.avg_len <= 30
@@ -304,12 +465,24 @@ def guess_column_mapping(df: pd.DataFrame) -> dict[str, str | None]:
 
 
 def infer_column_mapping(df: pd.DataFrame) -> dict[str, str | None]:
-    """Pre-fill the mapping from header names first, then from data shape.
+    """Pre-fill the whole mapping: fuzzy header match first, value shape after.
 
-    :func:`suggest_column_mapping` handles the easy case (a header already
-    called ``CPSE``); :func:`guess_column_mapping` fills the required fields
-    it left blank, never stealing a column an exact header match already
-    claimed.
+    Tier 1 -- :func:`match_column_headers` fuzzy-matches every field (required
+    *and* optional) to a source header. This dominates: a header named
+    "Enterprise" is the company column regardless of what its values look
+    like.
+
+    Tier 2 -- for any *required* field Tier 1 left blank,
+    :func:`guess_column_mapping`'s value-shape reading is used, but only where
+    it is itself discriminating: the description (longest text) and code
+    (unique, dash-segmented) signals are strong and used directly; the
+    company/category signal is used only when the shape reading actually told
+    the two apart (two or more label-like columns). A unit-of-measure column
+    is never accepted for CPSE or Material Category.
+
+    Optional fields are never filled from Tier 2 -- a leftover unclaimed
+    column is not evidence of anything -- and a required field with no
+    confident match stays ``None``.
 
     Args:
         df: The uploaded file, unmodified.
@@ -318,12 +491,27 @@ def infer_column_mapping(df: pd.DataFrame) -> dict[str, str | None]:
         ``{canonical_name: source_column_or_None}`` for every required and
         optional column -- the same shape as :func:`suggest_column_mapping`.
     """
-    mapping = suggest_column_mapping(list(df.columns))
+    mapping = match_column_headers(df)
     used = {source for source in mapping.values() if source}
-    for field, guess in guess_column_mapping(df).items():
-        if mapping.get(field) is None and guess is not None and guess not in used:
-            mapping[field] = guess
-            used.add(guess)
+    uom = _uom_columns(df)
+    guessed = guess_column_mapping(df)
+
+    def _fill(field: str, candidate: str | None) -> None:
+        if (
+            candidate is not None
+            and mapping.get(field) is None
+            and candidate not in used
+            and not (field in ("CPSE", "Material Category") and candidate in uom)
+        ):
+            mapping[field] = candidate
+            used.add(candidate)
+
+    _fill(config.INPUT_TEXT_COLUMN, guessed.get(config.INPUT_TEXT_COLUMN))
+    _fill("CPSE Material Code", guessed.get("CPSE Material Code"))
+    # Company/category shape signal only counts when it separated the two.
+    if guessed.get("CPSE") and guessed.get("Material Category"):
+        _fill("CPSE", guessed["CPSE"])
+        _fill("Material Category", guessed["Material Category"])
     return mapping
 
 
