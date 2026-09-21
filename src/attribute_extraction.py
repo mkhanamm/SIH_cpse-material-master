@@ -100,7 +100,14 @@ PATTERNS: dict[str, re.Pattern[str]] = {
         r"\bgrade\s*([a-z0-9]+)\b|\b(e\s?\d{3})\b|\bb\s?7\b|\bwpb\b|\bgr\s*([a-z0-9]+)\b"
     ),
     "rating_kva": re.compile(rf"{_NUM}\s*kva"),
-    "voltage_kv": re.compile(rf"{_NUM}\s*kv"),
+        # (?!a) stops "100 kva" being read as 100 kV -- the rating is not a voltage.
+        # A transformer ratio like "11/0.433 kv" or "11 kv / 433 v" states primary
+    # AND secondary. Capture the PRIMARY (the first, larger figure) so the two
+    # spellings agree; grabbing whichever number sits next to "kv" reads 0.433
+    # from one and 11 from the other, and the conflict veto then kills a real
+    # match. (?!a) stops "100 kva" being read as 100 kV.
+    "voltage_ratio_kv": re.compile(rf"{_NUM}\s*/\s*{_NUM}\s*kv(?!a)"),
+    "voltage_kv": re.compile(rf"{_NUM}\s*kv(?!a)"),
     "power_hp": re.compile(rf"{_NUM}\s*hp"),
     "flow_m3hr": re.compile(rf"{_NUM}\s*cumperhr"),
     "head_m": re.compile(rf"(?:head\s*{_NUM}\s*m\b|{_NUM}\s*m\s*head)"),
@@ -328,6 +335,10 @@ def _extract_from_text(text: str) -> tuple[dict[str, object], dict[str, str]]:
         val = _first_number(PATTERNS[name].search(text))
         if val is not None:
             values[name] = val
+        # Prefer the primary winding when the text states a ratio.
+    ratio_match = PATTERNS["voltage_ratio_kv"].search(text)
+    if ratio_match:
+        values["voltage_kv"] = float(ratio_match.group(1))
 
     ply = PATTERNS["ply"].search(text)
     if ply:

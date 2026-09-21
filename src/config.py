@@ -65,7 +65,7 @@ EVAL_COLUMNS = ["Standardized Description", "GroundTruth_Group"]
 # "sbert"     -> sentence-transformers; the production choice.
 # "tfidf_svd" -> offline scikit-learn fallback, no model download needed.
 # "auto"      -> try sbert, fall back to tfidf_svd if unavailable/offline.
-SEMANTIC_BACKEND = "auto"
+SEMANTIC_BACKEND = "tfidf_svd"
 SBERT_MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 TFIDF_SVD_COMPONENTS = 256  # latent dimensions for the offline encoder
 

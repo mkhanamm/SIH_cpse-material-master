@@ -245,6 +245,7 @@ def fold_case_and_punctuation(text: str) -> str:
     # Dotted abbreviations must be resolved while their periods still exist --
     # "m.s." is unrecoverable once the periods become spaces.
     lowered = re.sub(r"\bm\.\s*s\.?", " mild steel ", lowered)
+    lowered = re.sub(r"\bc\.\s*s\.?", " carbon steel ", lowered)
     lowered = re.sub(r"\bal\.", " aluminium ", lowered)
     # Protect decimals and ratios, then strip stray punctuation.
     lowered = lowered.replace("&", " and ")

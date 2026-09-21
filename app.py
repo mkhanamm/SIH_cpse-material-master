@@ -461,16 +461,41 @@ def view_load_data() -> None:
         "format."
     )
     suggested = data_loading.infer_column_mapping(raw_df)
-    options = ["-- none --", *raw_df.columns]
     hints = {column: data_loading.column_hint(raw_df[column]) for column in raw_df.columns}
+    ALL_TARGETS = [*data_loading.REQUIRED_COLUMNS, *data_loading.OPTIONAL_COLUMNS]    
 
     def _option_label(option: str) -> str:
         hint = hints.get(option)
         return f"{option}  ({hint})" if hint else option
 
+    def _current_choice(target: str) -> str | None:
+        """What this field is set to right now, falling back to its suggestion."""
+        chosen = st.session_state.get(f"col_map_{target}", suggested.get(target))
+        return None if chosen == "-- none --" else chosen
+
+    def _claimed_by_others(target: str) -> set[str]:
+        """Columns already taken by a different field.
+
+        A source column can only mean one thing, so once it is claimed it is
+        removed from every other dropdown. This keeps each list shrinking as
+        the mapping is filled in, instead of repeating all columns nine times.
+        """
+        return {
+            choice
+            for other in ALL_TARGETS
+            if other != target and (choice := _current_choice(other))
+        }
+
     def _mapping_selectbox(target: str) -> str | None:
-        default = suggested.get(target)
-        index = options.index(default) if default in options else 0
+        mine = _current_choice(target)
+        taken = _claimed_by_others(target)
+        options = ["-- none --"] + [c for c in raw_df.columns if c not in taken]
+        # The field's own selection must always remain selectable, or Streamlit
+        # raises when the stored value is missing from the options list.
+        if mine and mine not in options:
+            options.insert(1, mine)
+
+        index = options.index(mine) if mine in options else 0
         choice = st.selectbox(
             target, options, index=index, key=f"col_map_{target}",
             format_func=_option_label,
@@ -478,6 +503,10 @@ def view_load_data() -> None:
         return None if choice == "-- none --" else choice
 
     st.write("**Required**")
+    st.caption(
+        "Each column can only be used once — picking it here removes it from "
+        "the other dropdowns."
+    )
     mapping = {target: _mapping_selectbox(target) for target in data_loading.REQUIRED_COLUMNS}
     st.write("**Optional**")
     mapping.update(
