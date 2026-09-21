@@ -99,22 +99,7 @@ python -m src.matching_engine   # full pipeline + evaluation
 python -m pytest tests/ -q      # 229 tests
 ```
 
-**Semantic backend.** `config.SEMANTIC_BACKEND` selects `"sbert"` (production), `"tfidf_svd"` (offline) or `"auto"`. Every metric below was produced with **`tfidf_svd`**, the offline backend, because the development environment had no access to the model CDN. Both backends are live and interchangeable; the one actually used is recorded on the scored frame and printed with every report, so no figure is ever ambiguous about its source. Switching to SBERT requires no code change — the tier cut-offs are calibrated from a precision target rather than hard-coded, so they re-derive themselves against the new score distribution.
-
----
-
-## 4. Screenshots
-
-> **Not yet captured.** Run `streamlit run app.py`, walk the six views in order, and save images to `docs/img/`, then replace this section. The views are:
->
-> | File | View | What it shows |
-> |---|---|---|
-> | `docs/img/01-problem.png` | The Problem | Real cross-CPSE duplicates from the loaded data |
-> | `docs/img/02-run-matching.png` | Run Matching | Blocking reduction, classifier report, tier routing |
-> | `docs/img/03-explanation.png` | Review a Match | Per-attribute rationale for one cluster |
-> | `docs/img/04-review.png` | Human Review | Approve/reject/edit + active-learning before/after |
-> | `docs/img/05-cnmc.png` | National Code | Mapping table, legacy lookup, audit trail, rollback |
-> | `docs/img/06-dashboard.png` | Dashboard | Duplicate rate, cross-CPSE validation, savings estimate |
+** 4. Semantic backend.** `config.SEMANTIC_BACKEND` selects `"sbert"` (production), `"tfidf_svd"` (offline) or `"auto"`. Every metric below was produced with **`tfidf_svd`**, the offline backend, because the development environment had no access to the model CDN. Both backends are live and interchangeable; the one actually used is recorded on the scored frame and printed with every report, so no figure is ever ambiguous about its source. Switching to SBERT requires no code change — the tier cut-offs are calibrated from a precision target rather than hard-coded, so they re-derive themselves against the new score distribution.
 
 ---
 
